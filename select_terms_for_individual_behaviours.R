@@ -17,7 +17,7 @@ if (length(args) < 1) {
 }
 
 target_behaviour <- args[1]
-input_folder <- if (length(args) >= 2) args[2] else "MODELS-AGGREGATE-MODELSONLY"
+input_folder <- if (length(args) >= 2) args[2] else "MODELS-DSEM"
 
 is_dir <- function(path) {
   info <- suppressWarnings(file.info(path)$isdir)

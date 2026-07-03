@@ -1,160 +1,213 @@
-# DSEMCODE
+# 
 
-Scripts implementing a two-step Dynamic Structural Equation Model (DSEM) pipeline for infant behaviour time-series data, with optional Granger-style analysis.
-
----
-
-## Pipeline overview
-
-**Step 1 — `fitVAR.R`**
-Fits a multilevel VAR (Vector Autoregression) model to infant behaviour time-series data using Stan via cmdstanr. Each participant gets person-level lag coefficients (A), intercepts (mu), and log-variances (logvar), estimated with a non-centred hierarchical prior. The posterior draws are saved to an RDS file. Multiple independent runs (one per SLURM job) can be combined downstream.
-
-**Step 2a — `select_terms_for_individual_behaviours.R`**
-For a single target behaviour, enumerates all subsets of predictor blocks (lag blocks for each of the 9 behaviours, plus mean and log-variance terms), fits each combination as a regression on CDI vocabulary outcome (log1p-transformed), and computes PSIS-LOO ELPD. Stacking weights and pseudo-BMA+ weights are used to derive per-block inclusion weights and effect directions. Run once per behaviour (9 runs total, one per behaviour).
-
-**Step 2b — `final_term_weighting.R`**
-Loads the per-behaviour selection results from Step 2a and forms all combinations of the 9 behaviour sets (511 combinations). Fits each combination on the shared complete-case CDI sample and computes outer stacking weights via `loo::stacking_weights`. Final term inclusion weights are the product of outer (behaviour-level) and inner (block-level) weights. Supports checkpoint/resume: progress is saved every 25 combinations and automatically resumed if the script is restarted.
-
-**Optional — `granger_analysis.R`**
-Granger-style causal scoring. For each directed pair x → y, compares the full-model PSIS-LOO ELPD against a reduced model with all x-lag coefficients zeroed. The ELPD difference quantifies the predictive contribution of x to y under the fitted VAR posterior. Designed to run as a SLURM array job, with each task handling a round-robin subset of outcome variables.
+A two-step Bayesian pipeline for modelling infant behaviour time-series data and identifying predictors of language outcomes (CDI scores).
 
 ---
 
-## Required R packages
+## Overview
 
-- `cmdstanr` (with a working CmdStan installation)
-- `posterior`
-- `loo`
-- `dplyr`
-- `parallel` (base R, used by `granger_analysis.R`)
+The pipeline fits a multilevel Vector Autoregression (VAR) model to repeated-measures behaviour data, then uses Bayesian model averaging to identify which lag predictors (and their directions) best predict CDI vocabulary scores.
 
----
-
-## Required data files
-
-| File | Used by | Contents |
-|------|---------|----------|
-| `data_full/` | `fitVAR.R` | Per-participant CSV files named `<id>_11m.csv` and `<id>_12m.csv`, each with 9 behaviour columns |
-| `CDI_data.csv` | `select_terms_for_individual_behaviours.R` `final_term_weighting.R` | Vocabulary outcome data; must contain columns `participant` and `us18_imp` |
-
----
-
-## Running the pipeline
-
-### Step 1: Fit the VAR model
-
-```bash
-Rscript fitVAR.R <jobid>
 ```
-
-- `<jobid>` is an integer identifier; used to seed the sampler and name the output file.
-- Output: `dsem_step1_<jobid>.rds` containing `$fit`, `$draws`, and `$prep`.
-
-For a SLURM array job, submit one task per desired chain group and pass `$SLURM_ARRAY_TASK_ID` as the jobid. Example SLURM header:
-
-```bash
-#SBATCH --array=1-20
-Rscript fitVAR.R $SLURM_ARRAY_TASK_ID
-```
-
-All resulting RDS files should be placed in a single folder for Steps 2a and 2b to load and combine.
-
----
-
-### Step 2a: Per-behaviour predictor selection
-
-Run once for each of the 9 behaviours. These can be submitted as independent jobs in parallel.
-
-```bash
-Rscript select_terms_for_individual_behaviours.R <behaviour> [input_folder]
-```
-
-- `<behaviour>`: one of `contingent`, `gaze`, `CV`, `non_CV`, `index_point`, `open_point`, `give`, `show`, `other_gesture`
-- `[input_folder]`: directory containing the Step 1 RDS files (default: `MODELS-AGGREGATE-MODELSONLY`)
-
-Output (written into `input_folder`):
-- `dsem_selection_<behaviour>_single_behaviour.rds` — per-block inclusion weights and effect directions
-
-Example SLURM array:
-
-```bash
-#SBATCH --array=1-9
-behaviours=(contingent gaze CV non_CV index_point open_point give show other_gesture)
-Rscript select_terms_for_individual_behaviours.R ${behaviours[$SLURM_ARRAY_TASK_ID-1]} MODELS-STEP1
+Step 1:   fitVAR.R                               → dsem_step1_*.rds
+Step 1b:  granger_analysis.R          (optional) → granger_loocv_*.csv/.rds
+Step 2a:  select_terms_for_individual_behaviours.R → dsem_selection_*_single_behaviour.rds
+Step 2b:  final_term_weighting.R                 → dsem_selection_from_single_behaviour_sets*.csv/.rds
 ```
 
 ---
 
-### Step 2b: Two-level term weighting
+## Scripts
 
-Run after all 9 Step 2a jobs have completed.
+### `fitVAR.R` — Step 1: Multilevel VAR
 
+Fits a Bayesian multilevel VAR(p) model to all behaviours jointly, using a non-centred parameterisation over participants. Initialises HMC with Pathfinder variational inference for faster warmup.
+
+**Usage**
+```bash
+Rscript fitVAR.R [job_id]
+```
+`job_id` defaults to `Sys.getenv("SLURM_JOB_ID")` or `"local"`.
+
+**Key parameters** (edit at top of script)
+
+| Parameter | Default | Description |
+|---|---|---|
+| `T_subsample` | 3165 | Max time points per participant |
+| `p` | 5 | VAR lag order |
+| `grainsize` | 1 | Parallelism grain for `partial_sum_lpmf` |
+| `chains` | 1 | HMC chains |
+| `iter_warmup` | 200 | Warmup iterations |
+| `iter_sampling` | 400 | Post-warmup draws |
+| `adapt_delta` | 0.95 | HMC target acceptance rate |
+| `use_pathfinder` | TRUE | Use Pathfinder to initialise HMC |
+
+**Input files**
+- `data_full/*.csv` — per-participant behaviour time series (auto-detected by pattern)
+- `CDI_data.csv` — CDI vocabulary scores (not used directly here; required in Steps 2a/2b)
+
+**Output**
+- `dsem_step1_<job_id>.rds` — list with:
+  - `$fit` — raw cmdstanr fit object
+  - `$draws` — posterior draws (`posterior` package format), including `z_person[i,q]`
+  - `$prep` — data preparation object (see [RDS structure](#rds-structure) below)
+
+**Dependencies**
+- `cmdstanr` (≥ 0.5.3 for Pathfinder), CmdStan ≥ 2.33
+- `posterior`, `dplyr`, `tidyr`, `readr`
+
+---
+
+### `granger_analysis.R` — Step 1b: Granger-causality screening (optional)
+
+For each directed pair (x → y), computes the PSIS-LOO ELPD difference between the full VAR model and a reduced model with x's lag coefficients zeroed out for outcome y. A positive difference supports Granger causality. This step is independent of Steps 2a/2b and its output is not consumed downstream.
+
+**Usage**
+```bash
+# Single file
+Rscript granger_analysis.R dsem_step1_1.rds
+
+# Folder of files (combined automatically)
+Rscript granger_analysis.R MODELS-STEP1/ granger_loocv
+
+# SLURM array job (one shard per task)
+Rscript granger_analysis.R MODELS-STEP1/ granger_loocv array_task_id=1 array_task_count=9
+```
+
+**Input**
+- Step 1 RDS file or folder of RDS files
+
+**Output**
+- `<output_prefix>_pairwise_elpd.csv` and `.rds` — one row per directed pair (x, y) with columns:
+  `predictor_x`, `outcome_y`, `elpd_full`, `elpd_reduced_drop_xlags`, `elpd_diff_full_minus_reduced`, `se_diff`, `z_score`, `supports_x_granger_causing_y`, `strong_support_diff_gt_2se`, `mean_coef_x_to_y`, `prop_positive_x_to_y`, `coef_direction_x_to_y`
+
+**Dependencies**
+- `posterior`, `loo`
+
+---
+
+### `select_terms_for_individual_behaviours.R` — Step 2a: Within-behaviour block selection
+
+For each outcome behaviour in turn, fits an error-in-variables Gaussian bridge model of CDI scores on VAR parameters (posterior means and SDs as uncertain predictors). Enumerates all 2^(V+2) − 1 subsets of predictor blocks for that behaviour, computes PSIS-LOO for each, and derives per-block inclusion weights via stacking and pseudoBMA+.
+
+**Usage**
+```bash
+Rscript select_terms_for_individual_behaviours.R [step1_folder] [output_folder] [behaviour_name]
+```
+If `behaviour_name` is omitted, runs all behaviours. Can be run as a SLURM array job with one task per behaviour.
+
+**Input**
+- `dsem_step1_*.rds` or `dsem_result_*.rds` in the step1 folder
+- `CDI_data.csv` — must be present in the **current working directory**
+
+**Output** (one file per behaviour in output folder)
+- `dsem_selection_<behaviour>_single_behaviour.rds` — list with:
+  - `$behaviour` — behaviour name (character)
+  - `$block_inclusion` — data frame: `block_idx`, `block_label`, `inclusion_weight`, `effect_direction` (or `NULL` if no combos fitted)
+  - `$combo_summary`, `$stacking_weights`, `$pseudobma_weights`, `$baseline_elpd`, `$n_cc`
+
+**Dependencies**
+- `cmdstanr`, `posterior`, `loo`, `dplyr`
+
+---
+
+### `final_term_weighting.R` — Step 2b: Two-level stacking across behaviours
+
+Combines the within-behaviour block inclusion weights from Step 2a with outer stacking weights across behaviour-set combinations to produce final per-term inclusion weights.
+
+The final weight for a predictor term `q` is:
+
+```
+w_final(q) = outer_inclusion(behaviour(q)) × inner_inclusion(q | behaviour)
+```
+
+where `outer_inclusion` sums stacking weights over all behaviour-set combinations containing that behaviour, and `inner_inclusion` is the within-behaviour block weight from Step 2a.
+
+**Usage**
 ```bash
 Rscript final_term_weighting.R [selection_folder] [step1_folder] [output_prefix]
 ```
+Defaults: `selection_folder = "DSEM-MODELS-STEP1-PERCULATE"`, `step1_folder = selection_folder`, `output_prefix = "dsem_selection_from_single_behaviour_sets"`.
 
-- `[selection_folder]`: folder containing the `dsem_selection_*_single_behaviour.rds` files and where output is written (default: `DSEM-MODELS-STEP1-PERCULATE`)
-- `[step1_folder]`: folder containing Step 1 RDS files; can be the same as `selection_folder`
-- `[output_prefix]`: prefix for output files (default: `dsem_selection_from_single_behaviour_sets`)
+**Input**
+- `dsem_selection_*_single_behaviour.rds` in the selection folder (Step 2a output)
+- `dsem_step1_*.rds` or `dsem_result_*.rds` in the step1 folder (Step 1 output)
+- `CDI_data.csv` — must be present in the **current working directory**
+- Optional: a checkpoint file (`<output_prefix>_checkpoint.rds`) to resume a partial run
 
-Outputs (6 files written to `selection_folder`):
+**Output** (all saved to `selection_folder`)
+- `<output_prefix>_stacking_coefs.csv/.rds` — per-term inclusion weights
+- `<output_prefix>_stacking_weights.csv/.rds` — per-behaviour-combination stacking weights
+- `<output_prefix>.csv/.rds` — combined summary
 
-| File | Contents |
-|------|----------|
-| `<prefix>_stacking_coefs.csv` / `.rds` | Per-term inclusion weights and effect directions |
-| `<prefix>_stacking_weights.csv` / `.rds` | Per-combination stacking and pseudo-BMA+ weights |
-| `<prefix>.rds` | Full results object including all intermediate structures |
-| `<prefix>.csv` | Combination-level summary table |
-
-If the script is interrupted, a checkpoint file (`<prefix>_checkpoint.rds`) is saved every 25 combinations. Re-running the same command will resume automatically from the last checkpoint.
-
----
-
-### Optional: Granger causal scoring
-
-```bash
-Rscript granger_analysis.R <step1_rds_or_folder> [output_prefix] [loo_cores=1] [pair_cores=1] [chunk_size=2000]
-```
-
-For a SLURM array job with, for example, 9 tasks (one per outcome variable):
-
-```bash
-#SBATCH --array=1-9
-Rscript granger_analysis.R MODELS-STEP1 granger_loocv array_task_id=$SLURM_ARRAY_TASK_ID array_task_count=$SLURM_ARRAY_TASK_COUNT
-```
-
-Outputs per task (written beside the input file or in the input folder):
-- `<prefix>_task001of009_pairwise_elpd.rds`
-- `<prefix>_task001of009_pairwise_elpd.csv`
-
-After all tasks complete, combine shards:
-
-```bash
-Rscript dsem_var_granger_loocv_array_combine.R <output_dir> granger_loocv 9
-```
-
-This produces `granger_loocv_pairwise_elpd.rds` and `.csv` with all directed pairs ranked by ELPD advantage.
+**Dependencies**
+- `cmdstanr`, `posterior`, `loo`, `dplyr`
 
 ---
 
-## Execution order summary
+## RDS structure
+
+All Step 1 RDS files have the same structure, consumed by all downstream scripts:
 
 ```
-fitVAR.R  (×N jobs, one per chain group)
-    ↓
-select_terms_for_individual_behaviours.R  (×9 jobs, one per behaviour)
-    ↓
-final_term_weighting.R  (single job)
-
-granger_analysis.R  (optional; ×V array tasks, one per outcome)
-    ↓
-dsem_var_granger_loocv_array_combine.R  (optional; single job to merge shards)
+dsem_step1_*.rds
+├── $fit         — cmdstanr CmdStanMCMC object
+├── $draws       — posterior draws_matrix (includes z_person[i,q])
+└── $prep
+    ├── $stan_data       — list passed to Stan:
+    │   ├── N, V, K, T_max, T_i
+    │   ├── Y[N, T_max, V]       — outcome array
+    │   ├── X_lag[N, T_max, K]   — lagged predictor array
+    │   ├── obs_mask[N, T_max]   — 1 = observed time point
+    │   ├── is_binary[V]         — 1 = binary outcome
+    │   ├── prior_sd_A, prior_sd_intercept, prior_sd_sigma
+    │   └── grainsize            — parallel sum grain size
+    ├── $participants    — character vector, length N
+    ├── $behaviours      — character vector, length V
+    ├── $lag_col_names   — character vector, length K
+    ├── $X_lag_center, $X_lag_scale  — standardisation constants
+    ├── $V               — number of behaviours
+    ├── $K               — V × p (total lag columns)
+    └── $Q               — V×K + 2×V (parameters per person)
 ```
+
+The `z_person[i,q]` parameters encode each participant's individual VAR parameters in a non-centred form. `Q = V×K + 2×V` decomposes as:
+- `q = 1 … V×K`: lag coefficients A[y,x,lag] (column-major: outcome varies fastest)
+- `q = V×K+1 … V×K+V`: intercepts μ[y]
+- `q = V×K+V+1 … V×K+2V`: log-variances log(σ²)[y]
 
 ---
 
-## Notes
+## Workflow
 
-- The bridge step (within Steps 2a and 2b) uses posterior means and SDs of the per-person VAR parameter vectors (`z_person`) to propagate Step 1 uncertainty into the Step 2 regression, rather than carrying full posterior draws forward.
-- All CDI outcome values are log1p-transformed before regression.
-- Lagged predictors are z-scored within Step 1 data preparation; the centering and scaling vectors are stored in `$prep$X_lag_center` and `$prep$X_lag_scale` in the Step 1 RDS.
+```bash
+# 1. Fit the VAR model (SLURM array or single run)
+Rscript fitVAR.R $SLURM_JOB_ID
+
+# 1b. (Optional) Granger causality screening
+Rscript granger_analysis.R MODELS-STEP1/ granger_loocv \
+  array_task_id=$SLURM_ARRAY_TASK_ID array_task_count=9
+
+# 2a. Within-behaviour block selection (one SLURM task per behaviour, or all at once)
+Rscript select_terms_for_individual_behaviours.R MODELS-DSEM/ MODELS-DSEM/
+
+# 2b. Two-level stacking across behaviours
+Rscript final_term_weighting.R MODELS-DSEM/ MODELS-DSEM/ dsem_selection_from_single_behaviour_sets
+```
+
+`CDI_data.csv` must be in the directory from which Steps 2a and 2b are run.
+
+---
+
+## R package dependencies
+
+| Package | Used by |
+|---|---|
+| `cmdstanr` | fitVAR, select_terms, final_term_weighting |
+| `posterior` | fitVAR, granger_analysis, select_terms, final_term_weighting |
+| `loo` | granger_analysis, select_terms, final_term_weighting |
+| `dplyr` | fitVAR, select_terms, final_term_weighting |
+| `tidyr` | fitVAR |
+| `readr` | fitVAR |
+
+CmdStan ≥ 2.33 is required for Pathfinder initialisation in `fitVAR.R`.

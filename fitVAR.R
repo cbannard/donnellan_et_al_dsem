@@ -1,5 +1,5 @@
 # =============================================================================
-# fitVAR.R
+# dsem_step1.R
 #
 # Step 1 of the two-step DSEM pipeline.
 #
@@ -40,6 +40,56 @@ step1_stan <- "
 // which the bridge step in dsem_step2.R uses to construct the Step 2
 // measurement model.
 
+functions {
+  // Per-person contribution to the VAR log-likelihood, summed over all
+  // observed timepoints. Vectorized over behaviours (continuous outcomes
+  // via normal_lpdf, binary outcomes via bernoulli_logit_lpmf) so each
+  // (person, timepoint) costs two vectorized calls instead of V scalar
+  // calls. Designed for use with reduce_sum to parallelize over people.
+  real partial_sum_lpmf(array[] int i_idx,
+                         int start, int end,
+                         data array[,,] real Y,
+                         data array[,,] real X_lag,
+                         data array[] int T_i,
+                         data array[,] int obs_mask,
+                         array[] matrix A,
+                         array[] vector mu_person,
+                         array[] vector sigma_person,
+                         data array[] int idx_bin,
+                         data array[] int idx_cont) {
+    real lp = 0;
+    int n_bin  = size(idx_bin);
+    int n_cont = size(idx_cont);
+
+    for (i in i_idx) {
+      for (t in 1:T_i[i]) {
+        if (obs_mask[i, t] == 0) continue;
+
+        vector[cols(A[i])] x_t = to_vector(X_lag[i, t]);
+        vector[rows(A[i])] eta = mu_person[i] + A[i] * x_t;
+
+        if (n_cont > 0) {
+          vector[n_cont] y_cont = to_vector(Y[i, t, idx_cont]);
+          lp += normal_lpdf(y_cont | eta[idx_cont], sigma_person[i][idx_cont]);
+        }
+
+        if (n_bin > 0) {
+          vector[n_bin] y_bin    = to_vector(Y[i, t, idx_bin]);
+          vector[n_bin] eta_bin  = eta[idx_bin];
+          // Manual Bernoulli-logit log-density (avoids bernoulli_logit_lpmf,
+          // whose templated gradient code triggers a GCC 14 ICE via
+          // Boost's unchecked_factorial table). Bernoulli has no
+          // combinatorial term, so this is exact, not an approximation:
+          //   log p(y|eta) = y*log_inv_logit(eta) + (1-y)*log1m_inv_logit(eta)
+          lp += sum(y_bin       .* log_inv_logit(eta_bin)
+                    + (1 - y_bin) .* log1m_inv_logit(eta_bin));
+        }
+      }
+    }
+    return lp;
+  }
+}
+
 data {
   int<lower=1> N;
   int<lower=1> V;
@@ -55,6 +105,34 @@ data {
   real<lower=0> prior_sd_A;
   real<lower=0> prior_sd_intercept;
   real<lower=0> prior_sd_sigma;
+
+  int<lower=1> grainsize;
+}
+
+transformed data {
+  // Pre-split variable indices into binary / continuous groups so the
+  // likelihood can be evaluated with two vectorized statements per
+  // (person, timepoint) instead of V separate scalar statements.
+  int n_bin  = sum(is_binary);
+  int n_cont = V - n_bin;
+  array[n_bin]  int idx_bin;
+  array[n_cont] int idx_cont;
+  {
+    int bi = 1;
+    int ci = 1;
+    for (v in 1:V) {
+      if (is_binary[v] == 1) {
+        idx_bin[bi] = v;
+        bi += 1;
+      } else {
+        idx_cont[ci] = v;
+        ci += 1;
+      }
+    }
+  }
+
+  array[N] int seq_N;
+  for (i in 1:N) seq_N[i] = i;
 }
 
 parameters {
@@ -94,7 +172,6 @@ model {
   sigma_mu           ~ normal(0, prior_sd_intercept);
   logvar_pop         ~ normal(0, 1);
   sigma_logvar       ~ normal(0, 1);
-
   // Non-centred person-level priors
   for (i in 1:N) {
     to_vector(A_z[i]) ~ std_normal();
@@ -102,22 +179,15 @@ model {
     logvar_z[i]       ~ std_normal();
   }
 
-  // VAR likelihood
-  for (i in 1:N) {
-    for (t in 1:T_i[i]) {
-      if (obs_mask[i, t] == 0) continue;
-      vector[K] x_t = to_vector(X_lag[i, t]);
-      for (v in 1:V) {
-        real eta = mu_person[i][v] + dot_product(A[i][v], x_t);
-        if (is_binary[v] == 1) {
-          int y_int = to_int(Y[i, t, v]);
-          y_int ~ bernoulli_logit(eta);
-        } else {
-          Y[i, t, v] ~ normal(eta, sigma_person[i][v]);
-        }
-      }
-    }
-  }
+  // VAR likelihood (vectorized over behaviours; called directly without
+  // reduce_sum/threading to avoid a GCC 14 + TBB compiler ICE on this
+  // cluster). start/end are unused by partial_sum_lpmf's body (it just
+  // loops over i_idx), so passing the full 1:N range here is equivalent
+  // to evaluating all N people's contributions.
+  target += partial_sum_lpmf(seq_N | 1, N,
+                              Y, X_lag, T_i, obs_mask,
+                              A, mu_person, sigma_person,
+                              idx_bin, idx_cont);
 }
 
 generated quantities {
@@ -191,7 +261,8 @@ prepare_step1_data <- function(
   prior_sd_sigma     = 2.5,
   ts_method          = c("subsample", "aggregate", "none"),
   T_subsample        = 500,
-  window_size        = 10
+  window_size        = 10,
+  grainsize          = 1
 ) {
   ts_method    <- match.arg(ts_method)
   participants <- unique(combined_data[[id_col]])
@@ -296,7 +367,8 @@ prepare_step1_data <- function(
       is_binary          = as.integer(is_binary),
       prior_sd_A         = prior_sd_A,
       prior_sd_intercept = prior_sd_intercept,
-      prior_sd_sigma     = prior_sd_sigma
+      prior_sd_sigma     = prior_sd_sigma,
+      grainsize          = as.integer(grainsize)
     ),
     participants  = as.character(participants),
     behaviours    = behaviours,
@@ -319,7 +391,7 @@ fit_step1 <- function(
   behaviours,
   p                  = 5,
   id_col             = "participant_id",
-  prior_sd_A         = 1,
+  prior_sd_A         = 2,
   prior_sd_intercept = 5,
   prior_sd_sigma     = 2.5,
   ts_method          = "subsample",
@@ -329,17 +401,24 @@ fit_step1 <- function(
   iter_warmup        = 500,
   iter_sampling      = 500,
   cores              = 4,
+  grainsize          = 1,
   adapt_delta        = 0.95,
-  max_treedepth      = 12,
-  seed               = 42,
+  max_treedepth      = 10,
+  seed               = NULL,
   output_dir         = tempdir(),
+  use_pathfinder     = TRUE,
+  pathfinder_paths   = 4,
+  pathfinder_draws   = 200,
   ...
 ) {
   if (!requireNamespace("cmdstanr", quietly = TRUE)) stop("Install 'cmdstanr'")
 
+  if (is.null(seed)) seed <- sample.int(.Machine$integer.max, 1)
+
   message("=== STEP 1: Writing and compiling Stan model ===")
   stan_file <- cmdstanr::write_stan_file(step1_stan)
-  mod       <- cmdstanr::cmdstan_model(stan_file, compile = TRUE)
+  mod       <- cmdstanr::cmdstan_model(stan_file, compile = TRUE,
+                                        force_recompile = TRUE)
 
   message("=== STEP 1: Preparing data ===")
   prep <- prepare_step1_data(
@@ -352,7 +431,8 @@ fit_step1 <- function(
     prior_sd_sigma     = prior_sd_sigma,
     ts_method          = ts_method,
     T_subsample        = T_subsample,
-    window_size        = window_size
+    window_size        = window_size,
+    grainsize          = grainsize
   )
 
   V <- prep$stan_data$V
@@ -371,20 +451,48 @@ fit_step1 <- function(
     logvar_z     = matrix(0, nrow = N, ncol = V)
   )
 
+  # Run Pathfinder to get a fast variational approximation, then use its
+  # draws to initialize HMC. This gives HMC a starting point much closer
+  # to the typical set (and, via init-from-draws, an implicit starting
+  # mass-matrix scale), which can substantially shorten the iter_warmup
+  # needed for step-size/metric adaptation.
+  init_arg <- init_fn
+  if (use_pathfinder) {
+    message("=== STEP 1: Running Pathfinder for initialization ===")
+    pf <- tryCatch(
+      mod$pathfinder(
+        data       = prep$stan_data,
+        num_paths  = pathfinder_paths,
+        draws      = pathfinder_draws,
+        seed       = seed
+      ),
+      error = function(e) {
+        warning("Pathfinder failed (", conditionMessage(e),
+                "); falling back to default init.")
+        NULL
+      }
+    )
+    if (!is.null(pf)) {
+      init_arg <- pf  # cmdstanr accepts a CmdStanPathfinder object as init=
+    }
+  }
+
   message("=== STEP 1: Sampling (chains=", chains,
-          ", warmup=", iter_warmup, ", sampling=", iter_sampling, ") ===")
+          ", warmup=", iter_warmup, ", sampling=", iter_sampling,
+          ", seed=", seed, ") ===")
   fit <- mod$sample(
-    data            = prep$stan_data,
-    chains          = chains,
-    parallel_chains = cores,
-    iter_warmup     = iter_warmup,
-    iter_sampling   = iter_sampling,
-    adapt_delta     = adapt_delta,
-    max_treedepth   = max_treedepth,
-    seed            = seed,
-    init            = init_fn,
-    output_dir      = output_dir,
-    metric = "diag_e",
+    data              = prep$stan_data,
+    chains            = chains,
+    parallel_chains   = cores,
+    iter_warmup       = iter_warmup,
+    iter_sampling     = iter_sampling,
+    adapt_delta       = adapt_delta,
+    max_treedepth     = max_treedepth,
+    seed              = seed,
+    init              = init_arg,
+    output_dir        = output_dir,
+    metric      = "diag_e",
+    save_warmup = TRUE,
     ...
   )
 
@@ -395,8 +503,6 @@ fit_step1 <- function(
 # =============================================================================
 # DATA IMPORT
 # =============================================================================
-
-library(vars)
 library(dplyr)
 
 all_vars <- c("contingent", "gaze", "CV", "non_CV", "index_point",
@@ -451,13 +557,14 @@ step1_result <- fit_step1(
   combined_data      = combined_data,
   behaviours         = behaviours,
   p                  = 5,
-  prior_sd_A         = 1,
-  prior_sd_intercept = 5,
-  prior_sd_sigma     = 1,
-  ts_method          = "none",
+  prior_sd_A         = 2,
+  prior_sd_intercept = 10,
+  prior_sd_sigma     = 2.5,
+  ts_method          = "subsample",
+  T_subsample 	     = 3165,
   chains             = 1,
-  iter_warmup        = 500,
-  iter_sampling      = 500,
+  iter_warmup        = 200,
+  iter_sampling      = 400,
   cores              = 1,
   adapt_delta        = 0.95,
   refresh            = 1, 

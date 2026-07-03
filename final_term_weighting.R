@@ -27,7 +27,7 @@
 # =============================================================================#
 
 args <- commandArgs(trailingOnly = TRUE)
-selection_folder <- if (length(args) >= 1) args[1] else "DSEM-MODELS-STEP1-PERCULATE"
+selection_folder <- if (length(args) >= 1) args[1] else "MODELS-DSEM"
 step1_folder <- if (length(args) >= 2) args[2] else selection_folder
 output_prefix <- if (length(args) >= 3) args[3] else "dsem_selection_from_single_behaviour_sets"
 
@@ -117,6 +117,7 @@ extract_single_behaviour_record <- function(obj) {
   collect_record <- function(gs) {
     if (!is.list(gs)) return(NULL)
     if (is.null(gs$behaviour)) return(NULL)
+
     # New format: block_inclusion data frame with inclusion_weight per block.
     if (!is.null(gs$block_inclusion) && is.data.frame(gs$block_inclusion)) {
       return(list(
@@ -125,6 +126,53 @@ extract_single_behaviour_record <- function(obj) {
         n_cc            = as.integer(gs$n_cc)
       ))
     }
+
+    # Old format: selected_blocks integer vector (produced by an earlier version
+    # of select_terms_for_individual_behaviours.R).
+    # Convert to the block_inclusion data frame expected by this script.
+    # All selected blocks receive inclusion_weight = 1; effect_direction is
+    # derived from coef_summary$mostly_positive where available.
+    if (!is.null(gs$selected_blocks) &&
+        (is.integer(gs$selected_blocks) || is.numeric(gs$selected_blocks))) {
+      sel_blks  <- as.integer(gs$selected_blocks)
+      n_sel     <- length(sel_blks)
+
+      # Try to determine effect direction from coef_summary if present.
+      dir_vec <- rep(NA_character_, n_sel)
+      if (!is.null(gs$coef_summary) && is.data.frame(gs$coef_summary) &&
+          "term_local_idx" %in% names(gs$coef_summary) &&
+          "mostly_positive" %in% names(gs$coef_summary)) {
+        cs <- gs$coef_summary
+        for (j in seq_along(sel_blks)) {
+          blk <- sel_blks[j]
+          # term_local_idx values belonging to this block: rough heuristic using
+          # the block number (each block covers K_per_pair consecutive local indices
+          # for lag blocks, or a single index for Mean/Log-var).
+          blk_rows <- cs[cs$term_local_idx >= (blk - 1L) * 5L + 1L &
+                         cs$term_local_idx <= blk * 5L, , drop = FALSE]
+          if (nrow(blk_rows) == 0) next
+          prop_pos <- mean(blk_rows$mostly_positive, na.rm = TRUE)
+          dir_vec[j] <- if (!is.na(prop_pos) && prop_pos >= 0.5) "positive" else "negative"
+        }
+      }
+
+      bi <- data.frame(
+        block_idx        = sel_blks,
+        block_label      = paste0("Block_", sel_blks),
+        inclusion_weight = rep(1.0, n_sel),
+        effect_direction = dir_vec,
+        stringsAsFactors = FALSE
+      )
+
+      n_cc <- if (!is.null(gs$n_cc_final)) as.integer(gs$n_cc_final) else NA_integer_
+
+      return(list(
+        behaviour       = as.character(gs$behaviour),
+        block_inclusion = bi,
+        n_cc            = n_cc
+      ))
+    }
+
     NULL
   }
 
