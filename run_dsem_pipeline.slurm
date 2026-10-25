@@ -1,9 +1,9 @@
 #!/bin/bash --login
 # =============================================================================
-# replicate_rstb.slurm
+# run_dsem_pipeline.slurm
 #
-# Re-runs the full Study 1 (DSEM) pipeline from the donnellan_et_al_dsem repo
-# to reproduce the results in RSTB-2025-0407 (Phil. Trans. R. Soc. B):
+# Runs the full Study 1 (DSEM) pipeline from the donnellan_et_al_dsem repo
+# (Donnellan et al., Phil. Trans. R. Soc. B, RSTB-2025-0407):
 #
 #   Step 1   fitVAR.R                                 16 single-chain fits (1000 warmup + 1000 draws each)
 #   Step 1b  granger_analysis.R                       Figure 1 / 72 directed pairs
@@ -14,7 +14,7 @@
 #   Put this file in the donnellan_et_al_dsem/ folder (next to fitVAR.R and
 #   data_full.zip) on the cluster, then from a login node run:
 #
-#       bash replicate_rstb.slurm
+#       bash run_dsem_pipeline.slurm
 #
 #   (use "bash", not "sbatch"). The script checks the setup, then submits every
 #   stage as its own Slurm job, with dependencies so that each stage starts
@@ -25,16 +25,16 @@
 #
 #   To re-run a single stage (e.g. after fixing a failure):
 #
-#       bash replicate_rstb.slurm step2a        # also: step1, granger,
+#       bash run_dsem_pipeline.slurm step2a        # also: step1, granger,
 #                                               #   granger_combine, step2b
 #
 #   Step 2 seeds: by default each Step 2 job draws a random seed and records
-#   it (log + output .rds). To reproduce a run:  STEP2_SEED=12345 bash replicate_rstb.slurm step2b
+#   it (log + output .rds). To reproduce a run:  STEP2_SEED=12345 bash run_dsem_pipeline.slurm step2b
 #
 #   Step 1 skips chains whose dsem_step1_<n>.rds already exists, so
 #   re-submitting step1 only reruns missing or failed chains.
 #
-# OUTPUT (all under $RUN_DIR, default donnellan_et_al_dsem/replication/)
+# OUTPUT (all under $RUN_DIR, default donnellan_et_al_dsem/results/)
 #   MODELS-STEP1/dsem_step1_<n>.rds                     Step 1 posterior draws
 #   GRANGER/granger_loocv_pairwise_elpd.csv             Step 1b, all 72 pairs
 #   MODELS-STEP1/dsem_selection_<b>_single_behaviour.rds  Step 2a
@@ -79,7 +79,7 @@ STAGE="${STAGE:-${1:-submit}}"
 if [[ -z "${REPO_DIR:-}" ]]; then
   REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 fi
-RUN_DIR="${RUN_DIR:-$REPO_DIR/replication}"
+RUN_DIR="${RUN_DIR:-$REPO_DIR/results}"
 STEP1_DIR="$RUN_DIR/MODELS-STEP1"
 GRANGER_DIR="$RUN_DIR/GRANGER"
 LOG_DIR="$RUN_DIR/logs"
