@@ -1,23 +1,54 @@
 # =============================================================================
 # select_terms_for_individual_behaviours.R
 #
-# Finds best sets of predictors from VAR for a given behaviours
+# Finds best sets of predictors from VAR for a given behaviours.
+#
+# Candidate blocks for each target behaviour: V lag blocks (one per
+# predictor behaviour, K_per_pair lags each) plus the mean (intercept).
+# There is no log-variance block: the Step 1 model is Bernoulli-logit,
+# so it has no residual-variance parameter.
 #
 # Usage:
-#   Rscript select_terms_for_individual_behaviours.R <behaviour> [input_folder]
+#   Rscript select_terms_for_individual_behaviours.R <behaviour> [input_folder] [seed=<int>]
 #
 # Example:
 #   Rscript select_terms_for_individual_behaviours.R gaze
+#   Rscript select_terms_for_individual_behaviours.R gaze MODELS-DSEM seed=12345
+#
+# Without seed=, a random seed is drawn; it is printed and saved as $seed in
+# the output so the run can be repeated exactly.
 #
 # =============================================================================
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 1) {
-  stop("Usage: Rscript select_terms_for_individual_behaviours.R <behaviour> [input_folder]")
+
+# Random-number seed. Pass seed=<integer> to reproduce an earlier run;
+# otherwise a seed is drawn at random. Either way it is printed and saved in
+# the output, and fit number i uses seed + i so every Stan fit is
+# reproducible from that one number.
+parse_seed_arg <- function(args) {
+  hit <- grep("^(--)?seed=", args, value = TRUE)
+  if (length(hit) == 0) return(NA_integer_)
+  val <- suppressWarnings(as.integer(sub("^(--)?seed=", "", hit[length(hit)])))
+  if (is.na(val) || val < 1L) stop("seed must be a positive integer")
+  val
+}
+fit_seed <- function(base, i) {
+  as.integer(((as.numeric(base) + i - 1) %% .Machine$integer.max) + 1)
 }
 
-target_behaviour <- args[1]
-input_folder <- if (length(args) >= 2) args[2] else "MODELS-DSEM"
+base_seed <- parse_seed_arg(args)
+if (is.na(base_seed)) base_seed <- sample.int(.Machine$integer.max - 1e6, 1)
+message("Seed: ", base_seed, "  (re-run with seed=", base_seed, " to reproduce)")
+set.seed(base_seed)
+
+pos_args <- args[!grepl("=", args)]
+if (length(pos_args) < 1) {
+  stop("Usage: Rscript select_terms_for_individual_behaviours.R <behaviour> [input_folder] [seed=<int>]")
+}
+
+target_behaviour <- pos_args[1]
+input_folder <- if (length(pos_args) >= 2) pos_args[2] else "MODELS-DSEM"
 
 is_dir <- function(path) {
   info <- suppressWarnings(file.info(path)$isdir)
@@ -128,7 +159,7 @@ lag_blocks <- lapply(seq_len(V), function(pred_v) {
   seq_len(K_per_pair) + (pred_v - 1L) * K_per_pair
 })
 names(lag_blocks) <- behaviours
-block_names <- c(paste0("Lags: ", behaviours[seq_len(V)]), "Mean", "Log-var")
+block_names <- c(paste0("Lags: ", behaviours[seq_len(V)]), "Mean")
 
 message(
   "Target behaviour: ", target_behaviour,
@@ -217,8 +248,7 @@ group_indices <- lapply(seq_len(V), function(v) {
   list(
     A   = A_cols,
     mu  = V * K + v,
-    lv  = V * K + V + v,
-    all = c(A_cols, V * K + v, V * K + V + v)
+    all = c(A_cols, V * K + v)
   )
 })
 names(group_indices) <- behaviours
@@ -232,9 +262,11 @@ fit_and_loo <- function(mod, data_list,
                         chains        = 4,
                         iter_warmup   = 500,
                         iter_sampling = 500,
-                        refresh       = 0) {
+                        refresh       = 0,
+                        seed          = NULL) {
   fit <- mod$sample(
     data          = data_list,
+    seed          = seed,
     chains        = chains,
     iter_warmup   = iter_warmup,
     iter_sampling = iter_sampling,
@@ -258,14 +290,13 @@ n_terms <- length(q_cols)
 message("\n", strrep("=", 60))
 message(
   "Group: ", b, "  (", n_terms, " candidate terms: ",
-  K_per_pair, " lag-coef per predictor + 1 mean + 1 log-var)"
+  K_per_pair, " lag-coef per predictor + 1 mean)"
 )
 message(strrep("=", 60))
 
 block_defs <- c(
   lapply(seq_len(V), function(i) lag_blocks[[i]]),
-  list(K + 1L),
-  list(K + 2L)
+  list(K + 1L)
 )
 n_blocks <- length(block_defs)
 
@@ -300,7 +331,8 @@ Zsd_shared <- Z_sd[shared_mask,  , drop = FALSE]
 message("  Fitting intercept-only baseline on shared sample...")
 baseline_shared_res <- fit_and_loo(
   mod_intercept,
-  list(N = N_shared, y = y_shared, prior_sd_sigma = prior_sd_sigma)
+  list(N = N_shared, y = y_shared, prior_sd_sigma = prior_sd_sigma),
+  seed = fit_seed(base_seed, 0L)
 )
 baseline_shared_elpd <- as.numeric(
   baseline_shared_res$loo$estimates["elpd_loo", "Estimate"]
@@ -308,7 +340,8 @@ baseline_shared_elpd <- as.numeric(
 
 combo_results <- list()
 
-for (combo in all_combos) {
+for (ci in seq_along(all_combos)) {
+  combo       <- all_combos[[ci]]
   trial_local <- sort(unique(unlist(block_defs[combo])))
   trial_cols  <- q_cols[trial_local]
   P_trial     <- length(trial_local)
@@ -323,7 +356,7 @@ for (combo in all_combos) {
   )
 
   res <- tryCatch(
-    fit_and_loo(mod_normal, trial_data),
+    fit_and_loo(mod_normal, trial_data, seed = fit_seed(base_seed, ci)),
     error = function(e) NULL
   )
   if (is.null(res)) next
@@ -352,7 +385,8 @@ if (length(combo_results) == 0) {
     block_inclusion   = NULL,
     stacking_weights  = NULL,
     baseline_elpd     = baseline_shared_elpd,
-    n_cc              = N_shared
+    n_cc              = N_shared,
+    seed              = base_seed
   )
 } else {
   message(sprintf("  Computing stacking weights over %d fitted combinations...",
@@ -370,6 +404,7 @@ if (length(combo_results) == 0) {
 
   lpd_point   <- do.call(cbind, lapply(loo_list, function(l) l$pointwise[, "elpd_loo"]))
   stacking_w  <- as.numeric(loo::stacking_weights(lpd_point))
+  set.seed(base_seed)  # pseudo-BMA+ uses a Bayesian bootstrap
   pseudobma_w <- as.numeric(loo::pseudobma_weights(lpd_point, BB = TRUE))
   names(stacking_w)  <- names(loo_list)
   names(pseudobma_w) <- names(loo_list)
@@ -433,7 +468,8 @@ if (length(combo_results) == 0) {
     stacking_weights  = stacking_w,
     pseudobma_weights = pseudobma_w,
     baseline_elpd     = baseline_shared_elpd,
-    n_cc              = N_shared
+    n_cc              = N_shared,
+    seed              = base_seed
   )
 }
 

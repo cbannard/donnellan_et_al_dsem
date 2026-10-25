@@ -35,17 +35,23 @@ step1_stan <- "
 // dsem_step1_var.stan
 // Multilevel VAR model — no outcome regression.
 //
+// All behaviours are binary (0/1), so the likelihood is Bernoulli-logit
+// only. There is no residual-variance parameter: for a binary outcome the
+// variance is fixed by the probability, p(1 - p), so a per-person
+// log-variance would never enter the likelihood and would just reproduce
+// its prior.
+//
 // generated quantities block exposes z_person[i], the Q-vector
-//   z_i = [ vec(A[i]) | mu_person[i] | logvar_person[i] ]
+//   z_i = [ vec(A[i]) | mu_person[i] ]
 // which the bridge step in dsem_step2.R uses to construct the Step 2
 // measurement model.
 
 functions {
   // Per-person contribution to the VAR log-likelihood, summed over all
-  // observed timepoints. Vectorized over behaviours (continuous outcomes
-  // via normal_lpdf, binary outcomes via bernoulli_logit_lpmf) so each
-  // (person, timepoint) costs two vectorized calls instead of V scalar
-  // calls. Designed for use with reduce_sum to parallelize over people.
+  // observed timepoints. Vectorized over behaviours (all binary, logit
+  // link) so each (person, timepoint) costs one vectorized statement
+  // instead of V scalar ones. Designed for use with reduce_sum to
+  // parallelize over people.
   real partial_sum_lpmf(array[] int i_idx,
                          int start, int end,
                          data array[,,] real Y,
@@ -53,13 +59,8 @@ functions {
                          data array[] int T_i,
                          data array[,] int obs_mask,
                          array[] matrix A,
-                         array[] vector mu_person,
-                         array[] vector sigma_person,
-                         data array[] int idx_bin,
-                         data array[] int idx_cont) {
+                         array[] vector mu_person) {
     real lp = 0;
-    int n_bin  = size(idx_bin);
-    int n_cont = size(idx_cont);
 
     for (i in i_idx) {
       for (t in 1:T_i[i]) {
@@ -68,22 +69,14 @@ functions {
         vector[cols(A[i])] x_t = to_vector(X_lag[i, t]);
         vector[rows(A[i])] eta = mu_person[i] + A[i] * x_t;
 
-        if (n_cont > 0) {
-          vector[n_cont] y_cont = to_vector(Y[i, t, idx_cont]);
-          lp += normal_lpdf(y_cont | eta[idx_cont], sigma_person[i][idx_cont]);
-        }
-
-        if (n_bin > 0) {
-          vector[n_bin] y_bin    = to_vector(Y[i, t, idx_bin]);
-          vector[n_bin] eta_bin  = eta[idx_bin];
-          // Manual Bernoulli-logit log-density (avoids bernoulli_logit_lpmf,
-          // whose templated gradient code triggers a GCC 14 ICE via
-          // Boost's unchecked_factorial table). Bernoulli has no
-          // combinatorial term, so this is exact, not an approximation:
-          //   log p(y|eta) = y*log_inv_logit(eta) + (1-y)*log1m_inv_logit(eta)
-          lp += sum(y_bin       .* log_inv_logit(eta_bin)
-                    + (1 - y_bin) .* log1m_inv_logit(eta_bin));
-        }
+        vector[rows(A[i])] y_t = to_vector(Y[i, t]);
+        // Manual Bernoulli-logit log-density (avoids bernoulli_logit_lpmf,
+        // whose templated gradient code triggers a GCC 14 ICE via
+        // Boost's unchecked_factorial table). Bernoulli has no
+        // combinatorial term, so this is exact, not an approximation:
+        //   log p(y|eta) = y*log_inv_logit(eta) + (1-y)*log1m_inv_logit(eta)
+        lp += sum(y_t       .* log_inv_logit(eta)
+                  + (1 - y_t) .* log1m_inv_logit(eta));
       }
     }
     return lp;
@@ -110,26 +103,11 @@ data {
 }
 
 transformed data {
-  // Pre-split variable indices into binary / continuous groups so the
-  // likelihood can be evaluated with two vectorized statements per
-  // (person, timepoint) instead of V separate scalar statements.
-  int n_bin  = sum(is_binary);
-  int n_cont = V - n_bin;
-  array[n_bin]  int idx_bin;
-  array[n_cont] int idx_cont;
-  {
-    int bi = 1;
-    int ci = 1;
-    for (v in 1:V) {
-      if (is_binary[v] == 1) {
-        idx_bin[bi] = v;
-        bi += 1;
-      } else {
-        idx_cont[ci] = v;
-        ci += 1;
-      }
-    }
-  }
+  // The model has no residual-variance parameters, so it is only valid for
+  // binary outcomes.
+  for (v in 1:V)
+    if (is_binary[v] != 1)
+      reject(\"Behaviour \", v, \" is not binary; this model is Bernoulli-logit only.\");
 
   array[N] int seq_N;
   for (i in 1:N) seq_N[i] = i;
@@ -140,27 +118,19 @@ parameters {
   matrix<lower=0>[V, K]  sigma_A;
   vector[V]              mu_pop;
   vector<lower=0>[V]     sigma_mu;
-  vector[V]              logvar_pop;
-  vector<lower=0>[V]     sigma_logvar;
 
   // Non-centred person-level deviations
   array[N] matrix[V, K]  A_z;
   array[N] vector[V]     mu_z;
-  array[N] vector[V]     logvar_z;
 }
 
 transformed parameters {
   array[N] matrix[V, K]        A;
   array[N] vector[V]           mu_person;
-  array[N] vector[V]           logvar_person;
-  array[N] vector<lower=0>[V]  sigma_person;
 
   for (i in 1:N) {
     A[i]             = A_pop + sigma_A .* A_z[i];
     mu_person[i]     = mu_pop + sigma_mu .* mu_z[i];
-    logvar_person[i] = logvar_pop + sigma_logvar .* logvar_z[i];
-    for (v in 1:V)
-      sigma_person[i][v] = sqrt(exp(logvar_person[i][v]));
   }
 }
 
@@ -170,13 +140,10 @@ model {
   to_vector(sigma_A) ~ normal(0, prior_sd_A);
   mu_pop             ~ normal(0, prior_sd_intercept);
   sigma_mu           ~ normal(0, prior_sd_intercept);
-  logvar_pop         ~ normal(0, 1);
-  sigma_logvar       ~ normal(0, 1);
   // Non-centred person-level priors
   for (i in 1:N) {
     to_vector(A_z[i]) ~ std_normal();
     mu_z[i]           ~ std_normal();
-    logvar_z[i]       ~ std_normal();
   }
 
   // VAR likelihood (vectorized over behaviours; called directly without
@@ -186,20 +153,16 @@ model {
   // to evaluating all N people's contributions.
   target += partial_sum_lpmf(seq_N | 1, N,
                               Y, X_lag, T_i, obs_mask,
-                              A, mu_person, sigma_person,
-                              idx_bin, idx_cont);
+                              A, mu_person);
 }
 
 generated quantities {
   // z_person[i] is the full Q-vector of person i's VAR parameters.
   // The bridge step in dsem_step2.R reads these draws to form the
   // Gaussian measurement model that propagates uncertainty into Step 2.
-  array[N] vector[V * K + 2 * V] z_person;
+  array[N] vector[V * K + V] z_person;
   for (i in 1:N) {
-    z_person[i] = append_row(
-                    append_row(to_vector(A[i]), mu_person[i]),
-                    logvar_person[i]
-                  );
+    z_person[i] = append_row(to_vector(A[i]), mu_person[i]);
   }
   matrix[V, K] A_pop_out = A_pop;
 }
@@ -320,6 +283,10 @@ prepare_step1_data <- function(
   }, integer(1))
   message("Binary behaviours: ",
           paste(behaviours[is_binary == 1], collapse = ", "))
+  if (any(is_binary == 0L))
+    stop("Non-binary behaviour(s): ",
+         paste(behaviours[is_binary == 0L], collapse = ", "),
+         ". The Step 1 model is Bernoulli-logit only (no residual variance).")
 
   X_all_flat <- matrix(NA_real_, nrow = sum(T_i), ncol = K)
   row_ptr    <- 1L
@@ -377,7 +344,7 @@ prepare_step1_data <- function(
     X_lag_scale   = col_sd,
     V             = V,
     K             = K,
-    Q             = V * K + 2 * V
+    Q             = V * K + V
   )
 }
 
@@ -391,7 +358,7 @@ fit_step1 <- function(
   behaviours,
   p                  = 5,
   id_col             = "participant_id",
-  prior_sd_A         = 2,
+  prior_sd_A         = 1,
   prior_sd_intercept = 5,
   prior_sd_sigma     = 2.5,
   ts_method          = "subsample",
@@ -445,10 +412,7 @@ fit_step1 <- function(
     A_z          = array(0,    dim  = c(N, V, K)),
     mu_pop       = rep(0,   V),
     sigma_mu     = rep(0.1, V),
-    mu_z         = matrix(0, nrow = N, ncol = V),
-    logvar_pop   = rep(0,   V),
-    sigma_logvar = rep(0.1, V),
-    logvar_z     = matrix(0, nrow = N, ncol = V)
+    mu_z         = matrix(0, nrow = N, ncol = V)
   )
 
   # Run Pathfinder to get a fast variational approximation, then use its
@@ -557,8 +521,12 @@ step1_result <- fit_step1(
   combined_data      = combined_data,
   behaviours         = behaviours,
   p                  = 5,
-  prior_sd_A         = 2,
-  prior_sd_intercept = 10,
+  # Priors as reported in the paper: normal(0, 5) for the population
+  # intercepts and for children's variation around them (sigma_mu), and
+  # normal(0, 1) for the lag coefficients and their between-child SDs
+  # (sigma_A). prior_sd_sigma is not used by the model.
+  prior_sd_A         = 1,
+  prior_sd_intercept = 5,
   prior_sd_sigma     = 2.5,
   ts_method          = "subsample",
   T_subsample 	     = 3165,

@@ -21,7 +21,7 @@ Step 2b:  final_term_weighting.R                 → dsem_selection_from_single_
 
 ### `fitVAR.R` — Step 1: Multilevel VAR
 
-Fits a Bayesian multilevel VAR(p) model to all behaviours jointly, using a non-centred parameterisation over participants. Initialises HMC with Pathfinder variational inference for faster warmup.
+Fits a Bayesian multilevel logistic VAR(p) model to all behaviours jointly, using a non-centred parameterisation over participants. All behaviours are binary, so each person has lag coefficients and intercepts only — there are no residual-variance (log-variance) parameters, since a Bernoulli outcome's variance is fixed by its probability. The script stops if any behaviour is not 0/1. Initialises HMC with Pathfinder variational inference for faster warmup.
 
 **Usage**
 ```bash
@@ -88,13 +88,13 @@ Rscript granger_analysis.R MODELS-STEP1/ granger_loocv array_task_id=1 array_tas
 
 ### `select_terms_for_individual_behaviours.R` — Step 2a: Within-behaviour block selection
 
-For each outcome behaviour in turn, fits an error-in-variables Gaussian bridge model of CDI scores on VAR parameters (posterior means and SDs as uncertain predictors). Enumerates all 2^(V+2) − 1 subsets of predictor blocks for that behaviour, computes PSIS-LOO for each, and derives per-block inclusion weights via stacking and pseudoBMA+.
+For each outcome behaviour in turn, fits an error-in-variables Gaussian bridge model of CDI scores on VAR parameters (posterior means and SDs as uncertain predictors). Enumerates all 2^(V+1) − 1 subsets of predictor blocks for that behaviour (V lag blocks plus the mean), computes PSIS-LOO for each, and derives per-block inclusion weights via stacking and pseudoBMA+.
 
 **Usage**
 ```bash
-Rscript select_terms_for_individual_behaviours.R [step1_folder] [output_folder] [behaviour_name]
+Rscript select_terms_for_individual_behaviours.R <behaviour_name> [step1_folder]
 ```
-If `behaviour_name` is omitted, runs all behaviours. Can be run as a SLURM array job with one task per behaviour.
+Runs one behaviour per call (`step1_folder` defaults to `MODELS-DSEM`); results are written to `step1_folder`. Run as a SLURM array job with one task per behaviour.
 
 **Input**
 - `dsem_step1_*.rds` or `dsem_result_*.rds` in the step1 folder
@@ -168,13 +168,12 @@ dsem_step1_*.rds
     ├── $X_lag_center, $X_lag_scale  — standardisation constants
     ├── $V               — number of behaviours
     ├── $K               — V × p (total lag columns)
-    └── $Q               — V×K + 2×V (parameters per person)
+    └── $Q               — V×K + V (parameters per person)
 ```
 
-The `z_person[i,q]` parameters encode each participant's individual VAR parameters in a non-centred form. `Q = V×K + 2×V` decomposes as:
+The `z_person[i,q]` parameters encode each participant's individual VAR parameters in a non-centred form. `Q = V×K + V` decomposes as:
 - `q = 1 … V×K`: lag coefficients A[y,x,lag] (column-major: outcome varies fastest)
 - `q = V×K+1 … V×K+V`: intercepts μ[y]
-- `q = V×K+V+1 … V×K+2V`: log-variances log(σ²)[y]
 
 ---
 
@@ -189,7 +188,7 @@ Rscript granger_analysis.R MODELS-STEP1/ granger_loocv \
   array_task_id=$SLURM_ARRAY_TASK_ID array_task_count=9
 
 # 2a. Within-behaviour block selection (one SLURM task per behaviour, or all at once)
-Rscript select_terms_for_individual_behaviours.R MODELS-DSEM/ MODELS-DSEM/
+Rscript select_terms_for_individual_behaviours.R gaze MODELS-DSEM/   # repeat for each behaviour
 
 # 2b. Two-level stacking across behaviours
 Rscript final_term_weighting.R MODELS-DSEM/ MODELS-DSEM/ dsem_selection_from_single_behaviour_sets

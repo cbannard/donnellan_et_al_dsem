@@ -19,17 +19,41 @@
 #   w_final(q) = outer_inclusion(behaviour(q)) × inner_inclusion(q | behaviour)
 #
 # This gives fine-grained inclusion probabilities at the level of individual
-# x→y predictor pairs, means, and log-variances, without requiring an
-# exhaustive search over the full 2^99 predictor space.
+# x→y predictor pairs and means, without requiring an exhaustive search
+# over the full 2^90 predictor-block space (9 behaviours x 10 blocks).
+# There are no log-variance terms: the Step 1 model is Bernoulli-logit,
+# so it has no residual-variance parameter.
 #
 # Usage:
-#   Rscript dsem_step2_selection_from_single_behaviour_sets.R [selection_folder] [step1_folder] [output_prefix]
+#   Rscript final_term_weighting.R [selection_folder] [step1_folder] [output_prefix] [seed=<int>]
+#
+# Without seed=, a random seed is drawn; it is printed and saved as $seed in
+# <output_prefix>.rds so the run can be repeated exactly. A resumed run
+# (checkpoint present) reuses the checkpoint's seed.
 # =============================================================================#
 
 args <- commandArgs(trailingOnly = TRUE)
-selection_folder <- if (length(args) >= 1) args[1] else "MODELS-DSEM"
-step1_folder <- if (length(args) >= 2) args[2] else selection_folder
-output_prefix <- if (length(args) >= 3) args[3] else "dsem_selection_from_single_behaviour_sets"
+
+# Random-number seed. Pass seed=<integer> to reproduce an earlier run;
+# otherwise a seed is drawn at random. Either way it is printed and saved in
+# the output, and fit number i uses seed + i so every Stan fit is
+# reproducible from that one number.
+parse_seed_arg <- function(args) {
+  hit <- grep("^(--)?seed=", args, value = TRUE)
+  if (length(hit) == 0) return(NA_integer_)
+  val <- suppressWarnings(as.integer(sub("^(--)?seed=", "", hit[length(hit)])))
+  if (is.na(val) || val < 1L) stop("seed must be a positive integer")
+  val
+}
+fit_seed <- function(base, i) {
+  as.integer(((as.numeric(base) + i - 1) %% .Machine$integer.max) + 1)
+}
+
+seed_arg <- parse_seed_arg(args)
+pos_args <- args[!grepl("=", args)]
+selection_folder <- if (length(pos_args) >= 1) pos_args[1] else "MODELS-DSEM"
+step1_folder <- if (length(pos_args) >= 2) pos_args[2] else selection_folder
+output_prefix <- if (length(pos_args) >= 3) pos_args[3] else "dsem_selection_from_single_behaviour_sets"
 
 is_dir <- function(path) {
   info <- suppressWarnings(file.info(path)$isdir)
@@ -147,7 +171,7 @@ extract_single_behaviour_record <- function(obj) {
           blk <- sel_blks[j]
           # term_local_idx values belonging to this block: rough heuristic using
           # the block number (each block covers K_per_pair consecutive local indices
-          # for lag blocks, or a single index for Mean/Log-var).
+          # for lag blocks, or a single index for Mean).
           blk_rows <- cs[cs$term_local_idx >= (blk - 1L) * 5L + 1L &
                          cs$term_local_idx <= blk * 5L, , drop = FALSE]
           if (nrow(blk_rows) == 0) next
@@ -249,8 +273,7 @@ group_indices <- lapply(seq_len(V), function(v) {
   list(
     A = A_cols,
     mu = V * K + v,
-    lv = V * K + V + v,
-    all = c(A_cols, V * K + v, V * K + V + v)
+    all = c(A_cols, V * K + v)
   )
 })
 names(group_indices) <- behaviours
@@ -269,8 +292,7 @@ label_q_term <- function(q_col, behaviours, V, K, K_per_pair) {
     return(sprintf("mu[%s]", behaviours[v]))
   }
 
-  v <- q_col - (V * K + V)
-  sprintf("lv[%s]", behaviours[v])
+  stop("q_col ", q_col, " is outside the lag/mean range (log-variance terms are not used)")
 }
 
 decode_q_term <- function(q_col, behaviours, V, K, K_per_pair) {
@@ -292,8 +314,7 @@ decode_q_term <- function(q_col, behaviours, V, K, K_per_pair) {
     return(list(family = "mu", y = behaviours[y_idx], x = NA_character_, lag = NA_integer_))
   }
 
-  y_idx <- q_col - (V * K + V)
-  list(family = "lv", y = behaviours[y_idx], x = NA_character_, lag = NA_integer_)
+  stop("q_col ", q_col, " is outside the lag/mean range (log-variance terms are not used)")
 }
 
 bridge_step1 <- function(step1_obj) {
@@ -371,9 +392,14 @@ for (b in names(single_records)) {
   q_cols_b   <- group_indices[[b]]$all
   block_defs_b <- c(
     lapply(seq_len(V), function(i) lag_blocks[[i]]),
-    list(K + 1L),
-    list(K + 2L)
+    list(K + 1L)
   )
+
+  # Step 2a files made before log-variance terms were removed contain an
+  # extra "Log-var" block; their inner weights are not comparable.
+  if ("block_label" %in% names(bi) && any(grepl("Log-var", bi$block_label, fixed = TRUE)))
+    stop("Selection file for '", b, "' contains a Log-var block. ",
+         "Re-run select_terms_for_individual_behaviours.R with the current code.")
 
   # Only consider blocks that exist and have nonzero inclusion weight.
   bi <- bi[is.finite(bi$block_idx) &
@@ -422,9 +448,11 @@ message("Compiling Stan models...")
 mod_intercept <- cmdstan_model(write_stan_file(stan_intercept))
 mod_normal <- cmdstan_model(write_stan_file(stan_normal))
 
-fit_and_loo <- function(mod, data_list, chains = 4, iter_warmup = 500, iter_sampling = 500, refresh = 0) {
+fit_and_loo <- function(mod, data_list, chains = 4, iter_warmup = 500, iter_sampling = 500, refresh = 0,
+                        seed = NULL) {
   fit <- mod$sample(
     data = data_list,
+    seed = seed,
     chains = chains,
     iter_warmup = iter_warmup,
     iter_sampling = iter_sampling,
@@ -475,13 +503,30 @@ Zsd_shared <- Z_sd[shared_mask,  , drop = FALSE]
 checkpoint_file <- file.path(selection_folder, paste0(output_prefix, "_checkpoint.rds"))
 checkpoint_every <- 25L
 
+# Seed: a resumed run must reuse the checkpoint's seed so that every fit in
+# the final result comes from the same seed sequence.
+chk_seed <- if (file.exists(checkpoint_file)) readRDS(checkpoint_file)$seed else NULL
+if (!is.null(chk_seed)) {
+  if (!is.na(seed_arg) && seed_arg != chk_seed)
+    stop("seed=", seed_arg, " differs from the checkpoint's seed (", chk_seed,
+         "). Delete ", checkpoint_file, " to start afresh with a new seed.")
+  base_seed <- as.integer(chk_seed)
+} else if (!is.na(seed_arg)) {
+  base_seed <- seed_arg
+} else {
+  base_seed <- sample.int(.Machine$integer.max - 1e6, 1)
+}
+message("Seed: ", base_seed, "  (re-run with seed=", base_seed, " to reproduce)")
+set.seed(base_seed)
+
 # ---------------------------------------------------------------------------
 # Fit the intercept-only baseline on the shared sample (included in stacking).
 # ---------------------------------------------------------------------------
 message("Fitting intercept-only baseline on shared sample...")
 baseline_res <- fit_and_loo(
   mod_intercept,
-  list(N = N_shared, y = y_shared, prior_sd_sigma = prior_sd_sigma)
+  list(N = N_shared, y = y_shared, prior_sd_sigma = prior_sd_sigma),
+  seed = fit_seed(base_seed, 0L)
 )
 baseline_elpd_full <- as.numeric(baseline_res$loo$estimates["elpd_loo", "Estimate"])
 
@@ -518,7 +563,7 @@ for (ii in seq(resume_from, length(combos))) {
       elapsed / 60, avg_per_combo, remaining / 60
     ))
     saveRDS(
-      list(last_completed = ii, results = results, loo_list = loo_list),
+      list(last_completed = ii, results = results, loo_list = loo_list, seed = base_seed),
       checkpoint_file
     )
   }
@@ -535,7 +580,8 @@ for (ii in seq(resume_from, length(combos))) {
     prior_sd_sigma = prior_sd_sigma
   )
 
-  res <- tryCatch(fit_and_loo(mod_normal, trial_data), error = function(e) NULL)
+  res <- tryCatch(fit_and_loo(mod_normal, trial_data, seed = fit_seed(base_seed, ii)),
+                  error = function(e) NULL)
 
   if (is.null(res)) {
     results[[ii]] <- data.frame(
@@ -606,6 +652,7 @@ names(loo_list_valid) <- model_labels[valid_idx]
 
 lpd_point   <- do.call(cbind, lapply(loo_list_valid, function(l) l$pointwise[, "elpd_loo"]))
 stacking_w  <- loo::stacking_weights(lpd_point)
+set.seed(base_seed)  # pseudo-BMA+ uses a Bayesian bootstrap
 pseudobma_w <- loo::pseudobma_weights(lpd_point, BB = TRUE)
 
 # Map weights back to the results data frame rows.
@@ -780,7 +827,8 @@ saveRDS(
     candidate_behaviours    = candidate_behaviours,
     selected_q_by_behaviour = selected_q_by_behaviour,
     prior_sd_sigma          = prior_sd_sigma,
-    min_n_frac              = min_n_frac
+    min_n_frac              = min_n_frac,
+    seed                    = base_seed
   ),
   out_rds
 )

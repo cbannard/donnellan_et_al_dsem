@@ -143,20 +143,13 @@ loglik_binary <- function(eta, y_vec) {
   y_mat * ll1 + (1 - y_mat) * ll0
 }
 
-loglik_gaussian <- function(eta, y_vec, sigma_vec) {
-  y_mat  <- matrix(rep(y_vec, each = nrow(eta)), nrow = nrow(eta))
-  sigma2 <- sigma_vec^2
-  ll     <- sweep(-(y_mat - eta)^2, 1, 2 * sigma2, "/")
-  sweep(ll, 1, -0.5 * log(2 * pi * sigma2), "+")
-}
-
 # Compute PSIS-LOO directly on the full matrix — no chunking.
 run_loo <- function(ll) {
   loo::loo(ll, cores = 1L)
 }
 
 # Precompute full-model log-likelihood and LOO for outcome y.
-prepare_y_cache <- function(y_dat, y_idx, z_mat, col_lookup, V, K, is_binary_y) {
+prepare_y_cache <- function(y_dat, y_idx, z_mat, col_lookup, V, K) {
   S     <- nrow(z_mat)
   n_obs <- nrow(y_dat$X)
 
@@ -166,7 +159,6 @@ prepare_y_cache <- function(y_dat, y_idx, z_mat, col_lookup, V, K, is_binary_y) 
 
   A_q_idx <- as.integer(((seq_len(K) - 1L) * V) + y_idx)
   mu_q    <- V * K + y_idx
-  lv_q    <- V * K + V + y_idx
 
   for (i in unique(y_dat$person_idx)) {
     rows <- which(y_dat$person_idx == i)
@@ -175,28 +167,18 @@ prepare_y_cache <- function(y_dat, y_idx, z_mat, col_lookup, V, K, is_binary_y) 
 
     Ai  <- z_mat[, col_lookup[i, A_q_idx], drop = FALSE]
     mui <- z_mat[, col_lookup[i, mu_q]]
-    lvi <- z_mat[, col_lookup[i, lv_q]]
 
     eta_full <- Ai %*% t(Xi)
     eta_full <- sweep(eta_full, 1, mui, "+")
 
-    if (is_binary_y) {
-      ll_full_i <- loglik_binary(eta_full, yi)
-      sigma_i   <- NULL
-    } else {
-      sigma_i   <- sqrt(exp(lvi))
-      ll_full_i <- loglik_gaussian(eta_full, yi, sigma_i)
-    }
-
-    ll_full[, rows] <- ll_full_i
+    ll_full[, rows] <- loglik_binary(eta_full, yi)
 
     person_cache[[pc_id]] <- list(
       rows     = rows,
       Xi       = Xi,
       yi       = yi,
       Ai       = Ai,
-      eta_full = eta_full,
-      sigma_i  = sigma_i
+      eta_full = eta_full
     )
     pc_id <- pc_id + 1L
   }
@@ -208,8 +190,7 @@ prepare_y_cache <- function(y_dat, y_idx, z_mat, col_lookup, V, K, is_binary_y) 
     ll_full        = ll_full,
     loo_full       = loo_full,
     pointwise_full = loo_full$pointwise[, "elpd_loo"],
-    n_obs          = n_obs,
-    is_binary_y    = is_binary_y
+    n_obs          = n_obs
   )
 }
 
@@ -225,12 +206,7 @@ score_pair_from_cache <- function(y_cache, x_idx, K_per_pair) {
     contrib_block <- pc$Ai[, block_k, drop = FALSE] %*% t(pc$Xi[, block_k, drop = FALSE])
     eta_red       <- pc$eta_full - contrib_block
 
-    if (y_cache$is_binary_y) {
-      ll_red_i <- loglik_binary(eta_red, pc$yi)
-    } else {
-      ll_red_i <- loglik_gaussian(eta_red, pc$yi, pc$sigma_i)
-    }
-    ll_red[, pc$rows] <- ll_red_i
+    ll_red[, pc$rows] <- loglik_binary(eta_red, pc$yi)
     coef_pool <- c(coef_pool, as.vector(pc$Ai[, block_k, drop = FALSE]))
   }
 
@@ -281,6 +257,11 @@ N          <- stan_data$N
 K_per_pair <- as.integer(K / V)
 if (K %% V != 0L) stop("K must be divisible by V")
 is_binary <- as.logical(stan_data$is_binary)
+# The Step 1 model is Bernoulli-logit only (no residual variance), so every
+# outcome must be binary.
+if (!all(is_binary))
+  stop("Non-binary behaviour(s) in Step 1 data: ",
+       paste(behaviours[!is_binary], collapse = ", "))
 
 
 # =============================================================================
@@ -345,8 +326,7 @@ for (y_idx in y_idx_assigned) {
     z_mat       = z_mat,
     col_lookup  = col_lookup,
     V           = V,
-    K           = K,
-    is_binary_y = is_binary_y
+    K           = K
   )
 
   x_candidates <- setdiff(seq_len(V), y_idx)
