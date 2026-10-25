@@ -34,7 +34,10 @@
 #   Step 1 skips chains whose dsem_step1_<n>.rds already exists, so
 #   re-submitting step1 only reruns missing or failed chains.
 #
-# OUTPUT (all under $RUN_DIR, default donnellan_et_al_dsem/results/)
+# OUTPUT: everything the pipeline writes (results, logs, temp files and the
+# unzipped data) goes under $RUN_DIR, default /scratch/q55362cb/dsem_results/.
+# Nothing is written into the repo folder. Override with e.g.
+#   RUN_DIR=/scratch/q55362cb/run2 bash run_dsem_pipeline.slurm
 #   MODELS-STEP1/dsem_step1_<n>.rds                     Step 1 posterior draws
 #   GRANGER/granger_loocv_pairwise_elpd.csv             Step 1b, all 72 pairs
 #   MODELS-STEP1/dsem_selection_<b>_single_behaviour.rds  Step 2a
@@ -79,7 +82,8 @@ STAGE="${STAGE:-${1:-submit}}"
 if [[ -z "${REPO_DIR:-}" ]]; then
   REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 fi
-RUN_DIR="${RUN_DIR:-$REPO_DIR/results}"
+RUN_DIR="${RUN_DIR:-/scratch/q55362cb/dsem_results}"
+DATA_DIR="$RUN_DIR/data_full"   # data_full.zip is unzipped here, not in the repo
 STEP1_DIR="$RUN_DIR/MODELS-STEP1"
 GRANGER_DIR="$RUN_DIR/GRANGER"
 LOG_DIR="$RUN_DIR/logs"
@@ -129,12 +133,14 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
            final_term_weighting.R CDI_data.csv; do
     [[ -f "$REPO_DIR/$f" ]] || { echo "Missing $REPO_DIR/$f" >&2; exit 1; }
   done
-  if [[ ! -d "$REPO_DIR/data_full" ]]; then
-    [[ -f "$REPO_DIR/data_full.zip" ]] || { echo "Missing data_full/ and data_full.zip" >&2; exit 1; }
-    echo "Unzipping data_full.zip ..."
-    (cd "$REPO_DIR" && unzip -q data_full.zip -x '__MACOSX/*')
+  mkdir -p "$RUN_DIR" 2>/dev/null && [[ -w "$RUN_DIR" ]] \
+    || { echo "Cannot create or write to $RUN_DIR" >&2; exit 1; }
+  if [[ ! -d "$DATA_DIR" ]]; then
+    [[ -f "$REPO_DIR/data_full.zip" ]] || { echo "Missing $REPO_DIR/data_full.zip" >&2; exit 1; }
+    echo "Unzipping data_full.zip into $RUN_DIR ..."
+    unzip -q "$REPO_DIR/data_full.zip" -x '__MACOSX/*' -d "$RUN_DIR"
   fi
-  n_csv=$(find "$REPO_DIR/data_full" -name 'p*_1[12]m.csv' | wc -l)
+  n_csv=$(find "$DATA_DIR" -name 'p*_1[12]m.csv' | wc -l)
   echo "Found $n_csv participant CSV files in data_full/ (expect 116 = 58 children x 2 sessions)"
 
   if command -v module >/dev/null 2>&1; then
@@ -148,7 +154,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   fi
 
   mkdir -p "$STEP1_DIR" "$GRANGER_DIR" "$LOG_DIR" "$RUN_DIR/tmp"
-  ln -sfn "$REPO_DIR/data_full" "$STEP1_DIR/data_full"   # fitVAR.R reads ./data_full
+  ln -sfn "$DATA_DIR" "$STEP1_DIR/data_full"   # fitVAR.R reads ./data_full
 
   n_beh=${#BEHAVIOURS[@]}
   dep() { [[ "$WHAT" == submit && -n "$1" ]] && echo "--dependency=afterok:$1"; }

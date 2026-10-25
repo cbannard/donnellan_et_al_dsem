@@ -21,7 +21,7 @@ Step 2b:  final_term_weighting.R                 → dsem_selection_from_single_
 
 ### `fitVAR.R` — Step 1: Multilevel VAR
 
-Fits a Bayesian multilevel logistic VAR(p) model to all behaviours jointly, using a non-centred parameterisation over participants. All behaviours are binary, so each person has lag coefficients and intercepts only — there are no residual-variance (log-variance) parameters, since a Bernoulli outcome's variance is fixed by its probability. The script stops if any behaviour is not 0/1. Initialises HMC with Pathfinder variational inference for faster warmup.
+Fits a Bayesian multilevel logistic VAR(p) model to all behaviours jointly, using a non-centred parameterisation over participants. All behaviours are binary, so each person has lag coefficients and intercepts only — there are no residual-variance (log-variance) parameters, since a Bernoulli outcome's variance is fixed by its probability. The script stops if any behaviour is not 0/1. Lagged 0/1 predictors are centred but not scaled, so lag coefficients are on the log-odds scale. Priors: normal(0, 1) on lag coefficients and their between-child SDs, normal(0, 5) on population intercepts, half-normal(0, 2) on the between-child SD of intercepts. Initialises HMC with Pathfinder variational inference for faster warmup.
 
 **Usage**
 ```bash
@@ -37,8 +37,8 @@ Rscript fitVAR.R [job_id]
 | `p` | 5 | VAR lag order |
 | `grainsize` | 1 | Parallelism grain for `partial_sum_lpmf` |
 | `chains` | 1 | HMC chains |
-| `iter_warmup` | 200 | Warmup iterations |
-| `iter_sampling` | 400 | Post-warmup draws |
+| `iter_warmup` | 1000 | Warmup iterations |
+| `iter_sampling` | 1000 | Post-warmup draws |
 | `adapt_delta` | 0.95 | HMC target acceptance rate |
 | `use_pathfinder` | TRUE | Use Pathfinder to initialise HMC |
 
@@ -160,12 +160,12 @@ dsem_step1_*.rds
     │   ├── X_lag[N, T_max, K]   — lagged predictor array
     │   ├── obs_mask[N, T_max]   — 1 = observed time point
     │   ├── is_binary[V]         — 1 = binary outcome
-    │   ├── prior_sd_A, prior_sd_intercept, prior_sd_sigma
+    │   ├── prior_sd_A, prior_sd_intercept, prior_sd_sigma_mu
     │   └── grainsize            — parallel sum grain size
     ├── $participants    — character vector, length N
     ├── $behaviours      — character vector, length V
     ├── $lag_col_names   — character vector, length K
-    ├── $X_lag_center, $X_lag_scale  — standardisation constants
+    ├── $X_lag_center, $X_lag_scale  — centring constants (lags are 0/1, centred, not scaled; scale = 1)
     ├── $V               — number of behaviours
     ├── $K               — V × p (total lag columns)
     └── $Q               — V×K + V (parameters per person)

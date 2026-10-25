@@ -97,7 +97,7 @@ data {
 
   real<lower=0> prior_sd_A;
   real<lower=0> prior_sd_intercept;
-  real<lower=0> prior_sd_sigma;
+  real<lower=0> prior_sd_sigma_mu;   // SD of half-normal prior on sigma_mu
 
   int<lower=1> grainsize;
 }
@@ -139,7 +139,7 @@ model {
   to_vector(A_pop)   ~ normal(0, prior_sd_A);
   to_vector(sigma_A) ~ normal(0, prior_sd_A);
   mu_pop             ~ normal(0, prior_sd_intercept);
-  sigma_mu           ~ normal(0, prior_sd_intercept);
+  sigma_mu           ~ normal(0, prior_sd_sigma_mu);
   // Non-centred person-level priors
   for (i in 1:N) {
     to_vector(A_z[i]) ~ std_normal();
@@ -221,7 +221,7 @@ prepare_step1_data <- function(
   id_col             = "participant_id",
   prior_sd_A         = 1,
   prior_sd_intercept = 5,
-  prior_sd_sigma     = 2.5,
+  prior_sd_sigma_mu  = 2,
   ts_method          = c("subsample", "aggregate", "none"),
   T_subsample        = 500,
   window_size        = 10,
@@ -297,9 +297,14 @@ prepare_step1_data <- function(
         as.numeric(all_comps[[i]][[lag_col_names[k]]])
     row_ptr <- row_ptr + Ti
   }
+  # Lagged predictors are 0/1 indicators. They are centred (so mu is the
+  # log-odds at average lagged values) but NOT divided by their SD: for rare
+  # behaviours (e.g. ~0.1% of samples) scaling would turn one occurrence into
+  # a value of ~+30, making the normal(0, prior_sd_A) prior on A effectively
+  # flat. Unscaled, A is the change in log-odds when the lagged behaviour is
+  # present, and the prior regularises it on that scale.
   col_mn <- colMeans(X_all_flat, na.rm = TRUE)
-  col_sd <- apply(X_all_flat, 2, sd, na.rm = TRUE)
-  col_sd[col_sd == 0 | !is.finite(col_sd)] <- 1
+  col_sd <- rep(1, K)
 
   Y_arr    <- array(0,  dim = c(N, T_max, V))
   X_arr    <- array(0,  dim = c(N, T_max, K))
@@ -334,7 +339,7 @@ prepare_step1_data <- function(
       is_binary          = as.integer(is_binary),
       prior_sd_A         = prior_sd_A,
       prior_sd_intercept = prior_sd_intercept,
-      prior_sd_sigma     = prior_sd_sigma,
+      prior_sd_sigma_mu  = prior_sd_sigma_mu,
       grainsize          = as.integer(grainsize)
     ),
     participants  = as.character(participants),
@@ -360,7 +365,7 @@ fit_step1 <- function(
   id_col             = "participant_id",
   prior_sd_A         = 1,
   prior_sd_intercept = 5,
-  prior_sd_sigma     = 2.5,
+  prior_sd_sigma_mu  = 2,
   ts_method          = "subsample",
   T_subsample        = 500,
   window_size        = 10,
@@ -395,7 +400,7 @@ fit_step1 <- function(
     id_col             = id_col,
     prior_sd_A         = prior_sd_A,
     prior_sd_intercept = prior_sd_intercept,
-    prior_sd_sigma     = prior_sd_sigma,
+    prior_sd_sigma_mu  = prior_sd_sigma_mu,
     ts_method          = ts_method,
     T_subsample        = T_subsample,
     window_size        = window_size,
@@ -521,18 +526,20 @@ step1_result <- fit_step1(
   combined_data      = combined_data,
   behaviours         = behaviours,
   p                  = 5,
-  # Priors as reported in the paper: normal(0, 5) for the population
-  # intercepts and for children's variation around them (sigma_mu), and
-  # normal(0, 1) for the lag coefficients and their between-child SDs
-  # (sigma_A). prior_sd_sigma is not used by the model.
+  # Priors: normal(0, 5) for the population intercepts (mu_pop);
+  # half-normal(0, 2) for children's variation around them (sigma_mu), which
+  # stops children who never produce a rare behaviour from dragging the
+  # intercept hierarchy towards -infinity; normal(0, 1) for the lag
+  # coefficients (A_pop, on the 0/1 log-odds scale) and their between-child
+  # SDs (sigma_A).
   prior_sd_A         = 1,
   prior_sd_intercept = 5,
-  prior_sd_sigma     = 2.5,
+  prior_sd_sigma_mu  = 2,
   ts_method          = "subsample",
   T_subsample 	     = 3165,
-  chains             = 1,
-  iter_warmup        = 200,
-  iter_sampling      = 400,
+  chains             = 1,        # one chain per job; run 16 jobs
+  iter_warmup        = 1000,
+  iter_sampling      = 1000,
   cores              = 1,
   adapt_delta        = 0.95,
   refresh            = 1, 
