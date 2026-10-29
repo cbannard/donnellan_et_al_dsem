@@ -41,47 +41,15 @@ step1_stan <- "
 // log-variance would never enter the likelihood and would just reproduce
 // its prior.
 //
+// Likelihood is computed with one matrix product per child (all of that
+// child's observed time points at once) rather than one small
+// matrix-vector product per time point. The model is unchanged; this only
+// cuts the automatic-differentiation overhead, which dominated run time.
+//
 // generated quantities block exposes z_person[i], the Q-vector
 //   z_i = [ vec(A[i]) | mu_person[i] ]
 // which the bridge step in dsem_step2.R uses to construct the Step 2
 // measurement model.
-
-functions {
-  // Per-person contribution to the VAR log-likelihood, summed over all
-  // observed timepoints. Vectorized over behaviours (all binary, logit
-  // link) so each (person, timepoint) costs one vectorized statement
-  // instead of V scalar ones. Designed for use with reduce_sum to
-  // parallelize over people.
-  real partial_sum_lpmf(array[] int i_idx,
-                         int start, int end,
-                         data array[,,] real Y,
-                         data array[,,] real X_lag,
-                         data array[] int T_i,
-                         data array[,] int obs_mask,
-                         array[] matrix A,
-                         array[] vector mu_person) {
-    real lp = 0;
-
-    for (i in i_idx) {
-      for (t in 1:T_i[i]) {
-        if (obs_mask[i, t] == 0) continue;
-
-        vector[cols(A[i])] x_t = to_vector(X_lag[i, t]);
-        vector[rows(A[i])] eta = mu_person[i] + A[i] * x_t;
-
-        vector[rows(A[i])] y_t = to_vector(Y[i, t]);
-        // Manual Bernoulli-logit log-density (avoids bernoulli_logit_lpmf,
-        // whose templated gradient code triggers a GCC 14 ICE via
-        // Boost's unchecked_factorial table). Bernoulli has no
-        // combinatorial term, so this is exact, not an approximation:
-        //   log p(y|eta) = y*log_inv_logit(eta) + (1-y)*log1m_inv_logit(eta)
-        lp += sum(y_t       .* log_inv_logit(eta)
-                  + (1 - y_t) .* log1m_inv_logit(eta));
-      }
-    }
-    return lp;
-  }
-}
 
 data {
   int<lower=1> N;
@@ -109,8 +77,33 @@ transformed data {
     if (is_binary[v] != 1)
       reject(\"Behaviour \", v, \" is not binary; this model is Bernoulli-logit only.\");
 
-  array[N] int seq_N;
-  for (i in 1:N) seq_N[i] = i;
+  // Stack every child's observed time points into one design matrix,
+  // with a leading column of 1s for the intercept, so each child's linear
+  // predictor is a single product: X1[rows of i] * [mu_i | A_i]'.
+  array[N] int n_obs;
+  for (i in 1:N) {
+    n_obs[i] = 0;
+    for (t in 1:T_i[i]) n_obs[i] += obs_mask[i, t];
+  }
+  int n_total = sum(n_obs);
+  array[N] int row_start;
+  array[N] int row_end;
+  matrix[n_total, K + 1] X1;
+  matrix[n_total, V]     Y_obs;
+  {
+    int r = 0;
+    for (i in 1:N) {
+      row_start[i] = r + 1;
+      for (t in 1:T_i[i]) {
+        if (obs_mask[i, t] == 0) continue;
+        r += 1;
+        X1[r, 1] = 1;
+        for (k in 1:K) X1[r, k + 1] = X_lag[i, t, k];
+        for (v in 1:V) Y_obs[r, v] = Y[i, t, v];
+      }
+      row_end[i] = r;
+    }
+  }
 }
 
 parameters {
@@ -146,14 +139,18 @@ model {
     mu_z[i]           ~ std_normal();
   }
 
-  // VAR likelihood (vectorized over behaviours; called directly without
-  // reduce_sum/threading to avoid a GCC 14 + TBB compiler ICE on this
-  // cluster). start/end are unused by partial_sum_lpmf's body (it just
-  // loops over i_idx), so passing the full 1:N range here is equivalent
-  // to evaluating all N people's contributions.
-  target += partial_sum_lpmf(seq_N | 1, N,
-                              Y, X_lag, T_i, obs_mask,
-                              A, mu_person);
+  // VAR likelihood, one matrix product per child. Bernoulli-logit
+  // log-density written as y*eta - log(1 + exp(eta)), which equals
+  // y*log_inv_logit(eta) + (1-y)*log1m_inv_logit(eta) exactly. (Written by
+  // hand rather than with bernoulli_logit_lpmf, whose gradient code
+  // triggers a GCC 14 internal compiler error; no threading/reduce_sum for
+  // the same reason.)
+  for (i in 1:N) {
+    if (n_obs[i] == 0) continue;
+    matrix[n_obs[i], V] eta =
+      X1[row_start[i]:row_end[i]] * append_col(mu_person[i], A[i])';
+    target += sum(Y_obs[row_start[i]:row_end[i]] .* eta - log1p_exp(eta));
+  }
 }
 
 generated quantities {

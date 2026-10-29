@@ -54,7 +54,7 @@ Rscript fitVAR.R [job_id]
 
 **Dependencies**
 - `cmdstanr` (≥ 0.5.3 for Pathfinder), CmdStan ≥ 2.33
-- `posterior`, `dplyr`, `tidyr`, `readr`
+- `posterior`, `dplyr`
 
 ---
 
@@ -206,7 +206,5 @@ Rscript final_term_weighting.R MODELS-DSEM/ MODELS-DSEM/ dsem_selection_from_sin
 | `posterior` | fitVAR, granger_analysis, select_terms, final_term_weighting |
 | `loo` | granger_analysis, select_terms, final_term_weighting |
 | `dplyr` | fitVAR, select_terms, final_term_weighting |
-| `tidyr` | fitVAR |
-| `readr` | fitVAR |
 
 CmdStan ≥ 2.33 is required for Pathfinder initialisation in `fitVAR.R`.

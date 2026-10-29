@@ -47,7 +47,7 @@
 #
 # Cluster settings below match the original runs (CSF3-style "himem"
 # partition, module apps/gcc/R/4.4.2, 7-day limit). CmdStan (>= 2.33) and the
-# R packages cmdstanr, posterior, loo, dplyr, tidyr, readr must already be
+# R packages cmdstanr, posterior, loo and dplyr must already be
 # installed for this R module.
 # =============================================================================
 
@@ -147,7 +147,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     load_r >/dev/null 2>&1 || true
   fi
   if command -v Rscript >/dev/null 2>&1; then
-    Rscript -e 'for (p in c("cmdstanr","posterior","loo","dplyr","tidyr","readr")) if (!requireNamespace(p, quietly=TRUE)) stop("R package missing: ", p); v <- cmdstanr::cmdstan_version(); cat("CmdStan", v, "\n"); if (package_version(v) < "2.33") stop("CmdStan >= 2.33 needed for Pathfinder")' \
+    Rscript -e 'for (p in c("cmdstanr","posterior","loo","dplyr")) if (!requireNamespace(p, quietly=TRUE)) stop("R package missing: ", p); v <- cmdstanr::cmdstan_version(); cat("CmdStan", v, "\n"); if (package_version(v) < "2.33") stop("CmdStan >= 2.33 needed for Pathfinder")' \
       || { echo "Preflight R check failed (see above)." >&2; exit 1; }
   else
     echo "WARNING: Rscript not found on this node; skipping package check."
