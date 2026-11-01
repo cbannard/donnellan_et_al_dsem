@@ -10,6 +10,7 @@
 #   Step 1b  granger_analysis.R                       Figure 1 / 72 directed pairs
 #   Step 2a  select_terms_for_individual_behaviours.R one task per behaviour
 #   Step 2b  final_term_weighting.R                   Figure 2 inclusion weights
+#   Figures  make_figures.R                           Figures 1 and 2 (network plots)
 #
 # HOW TO RUN
 #   Put this file in the donnellan_et_al_dsem/ folder (next to fitVAR.R and
@@ -22,13 +23,13 @@
 #   only after the stages it needs have finished successfully:
 #
 #       step1 (array 1-16)  ──┬── convergence
-#                             ├── granger (array) ── granger_combine
-#                             └── step2a  (array 0-8) ── step2b
+#                             ├── granger (array) ── granger_combine ──┐
+#                             └── step2a  (array 0-8) ── step2b ───────┴── figures
 #
 #   To re-run a single stage (e.g. after fixing a failure):
 #
 #       bash run_dsem_pipeline.slurm step2a        # also: step1, convergence,
-#                                               #   granger, granger_combine, step2b
+#                                               #   granger, granger_combine, step2b, figures
 #
 #   Step 2 seeds: by default each Step 2 job draws a random seed and records
 #   it (log + output .rds). To reproduce a run:  STEP2_SEED=12345 bash run_dsem_pipeline.slurm step2b
@@ -46,6 +47,8 @@
 #   MODELS-STEP1/dsem_selection_from_single_behaviour_sets_stacking_coefs.csv
 #                                                       Step 2b final weights
 #   CONVERGENCE/convergence_report.txt                  Step 1 convergence summary (+ CSVs, plots)
+#   FIGURES/figure1_granger_network.{pdf,png}            Figure 1 (+ figure1_edges.csv)
+#   FIGURES/figure2_vocabulary_network.{pdf,png}         Figure 2 (+ figure2_terms.csv)
 #   logs/                                               one log per task
 #
 # Cluster settings below match the original runs (CSF3-style "himem"
@@ -134,7 +137,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
 
   # --- preflight checks ---
   for f in fitVAR.R granger_analysis.R select_terms_for_individual_behaviours.R \
-           final_term_weighting.R check_convergence.R CDI_data.csv; do
+           final_term_weighting.R check_convergence.R make_figures.R CDI_data.csv; do
     [[ -f "$REPO_DIR/$f" ]] || { echo "Missing $REPO_DIR/$f" >&2; exit 1; }
   done
   mkdir -p "$RUN_DIR" 2>/dev/null && [[ -w "$RUN_DIR" ]] \
@@ -193,6 +196,12 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     J2B=$(submit_stage step2b -J dsem_step2b -t "$TIME_LONG" $(mem_flag "$MEM_STEP2") \
             $(dep "$J2A") -o "$LOG_DIR/step2b.out")
     echo "Step 2b  (final term weighting):            job $J2B"
+  fi
+  if [[ "$WHAT" == submit || "$WHAT" == figures ]]; then
+    fig_dep=""
+    [[ "$WHAT" == submit ]] && fig_dep="--dependency=afterok:${JGC}:${J2B}"
+    JF=$(submit_stage figures -J dsem_figures -t 0-1 --mem=8G $fig_dep -o "$LOG_DIR/figures.out")
+    echo "Figures  (Figures 1 and 2):                 job $JF"
   fi
   echo "Monitor with: squeue -u \$USER    Logs: $LOG_DIR"
   exit 0
@@ -266,6 +275,12 @@ convergence)
   Rscript "$REPO_DIR/check_convergence.R" "$STEP1_DIR" "$RUN_DIR/CONVERGENCE"
   ;;
 
+figures)
+  banner "Figures 1 and 2"
+  load_r
+  Rscript "$REPO_DIR/make_figures.R" "$RUN_DIR" "$RUN_DIR/FIGURES"
+  ;;
+
 step2b)
   banner "Step 2b: final_term_weighting.R"
   load_r; use_private_tmp
@@ -277,7 +292,7 @@ step2b)
   ;;
 
 *)
-  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | step2a | step2b" >&2
+  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | step2a | step2b | figures" >&2
   exit 1
   ;;
 esac
