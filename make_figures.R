@@ -4,10 +4,11 @@
 # Draws Figures 1 and 2 (network diagrams) from the pipeline's outputs.
 #
 # Usage:
-#   Rscript make_figures.R <run_dir> [output_folder] [threshold=0.333]
+#   Rscript make_figures.R <run_dir> [output_folder] [figure=1|2|both] [threshold=0.333]
 #
 #   run_dir        the pipeline's RUN_DIR (holds GRANGER/ and MODELS-STEP1/)
 #   output_folder  default: <run_dir>/FIGURES
+#   figure=        which figure to draw: 1, 2 or both (default both)
 #   threshold=     Figure 2 inclusion-weight cut-off (default 1/3, as in the paper)
 #
 # Figure 1 (Step 1b, granger_analysis.R)
@@ -31,13 +32,18 @@
 # =============================================================================
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 1) stop("Usage: Rscript make_figures.R <run_dir> [output_folder] [threshold=0.333]")
+if (length(args) < 1) stop("Usage: Rscript make_figures.R <run_dir> [output_folder] [figure=1|2|both] [threshold=0.333]")
 keyed     <- args[grepl("=", args)]
 pos_args  <- args[!grepl("=", args)]
 run_dir   <- pos_args[1]
 out_dir   <- if (length(pos_args) >= 2) pos_args[2] else file.path(run_dir, "FIGURES")
 thr_arg   <- sub("^threshold=", "", keyed[grepl("^threshold=", keyed)])
 threshold <- if (length(thr_arg)) as.numeric(thr_arg) else 1/3
+fig_arg   <- sub("^figure=", "", keyed[grepl("^figure=", keyed)])
+which_fig <- if (length(fig_arg)) tolower(fig_arg[length(fig_arg)]) else "both"
+if (!which_fig %in% c("1", "2", "both")) stop("figure= must be 1, 2 or both")
+do_fig1 <- which_fig %in% c("1", "both")
+do_fig2 <- which_fig %in% c("2", "both")
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
 suppressPackageStartupMessages(library(ggplot2))
@@ -151,7 +157,9 @@ key_line <- function(data, params, size) {
 # =============================================================================
 # Figure 1
 # =============================================================================
-if (file.exists(granger_csv)) {
+if (!do_fig1) {
+  # Figure 1 not requested
+} else if (file.exists(granger_csv)) {
   g <- read.csv(granger_csv, stringsAsFactors = FALSE)
   shown <- g[g$elpd_diff_full_minus_reduced > 0 & g$mean_coef_x_to_y > 0, ]
   shown <- shown[order(shown$z_score), ]
@@ -185,7 +193,9 @@ if (file.exists(granger_csv)) {
 # =============================================================================
 # Figure 2
 # =============================================================================
-if (file.exists(coefs_csv)) {
+if (!do_fig2) {
+  # Figure 2 not requested
+} else if (file.exists(coefs_csv)) {
   cf <- read.csv(coefs_csv, stringsAsFactors = FALSE)
   is_A  <- grepl("^A\\[", cf$term_label)
   is_mu <- grepl("^mu\\[", cf$term_label)

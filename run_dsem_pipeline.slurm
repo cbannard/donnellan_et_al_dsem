@@ -34,6 +34,8 @@
 #   Step 2 seeds: by default each Step 2 job draws a random seed and records
 #   it (log + output .rds). To reproduce a run:  STEP2_SEED=12345 bash run_dsem_pipeline.slurm step2b
 #
+#   Figures can be drawn one at a time:  FIGURE=1 bash run_dsem_pipeline.slurm figures
+#
 #   Step 1 skips chains whose dsem_step1_<n>.rds already exists, so
 #   re-submitting step1 only reruns missing or failed chains.
 #
@@ -71,6 +73,7 @@ MEM_GRANGER="${MEM_GRANGER:-512G}"   # original Granger job used 512G
 MEM_STEP2="${MEM_STEP2:-256G}"       # steps 2a/2b load all step-1 files at once
 MEM_CONV="${MEM_CONV:-128G}"         # convergence check holds all chains' draws
 
+FIGURE="${FIGURE:-both}"             # figures stage: 1, 2 or both
 STEP2_SEED="${STEP2_SEED:-}"         # blank = each Step 2 job draws a random seed
                                       #   (printed in its log and saved in its .rds);
                                       #   set a number to reproduce an earlier run
@@ -117,7 +120,7 @@ banner() {
 submit_stage() {
   local stage="$1"; shift
   sbatch --parsable -p "$PARTITION" -n 1 \
-    --export=ALL,STAGE="$stage",REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR",STEP2_SEED="$STEP2_SEED" \
+    --export=ALL,STAGE="$stage",REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR",STEP2_SEED="$STEP2_SEED",FIGURE="$FIGURE" \
     "$@" "$SELF"
 }
 
@@ -278,7 +281,7 @@ convergence)
 figures)
   banner "Figures 1 and 2"
   load_r
-  Rscript "$REPO_DIR/make_figures.R" "$RUN_DIR" "$RUN_DIR/FIGURES"
+  Rscript "$REPO_DIR/make_figures.R" "$RUN_DIR" "$RUN_DIR/FIGURES" figure="$FIGURE"
   ;;
 
 step2b)
