@@ -143,9 +143,24 @@ loglik_binary <- function(eta, y_vec) {
   y_mat * ll1 + (1 - y_mat) * ll0
 }
 
-# Compute PSIS-LOO directly on the full matrix — no chunking.
-run_loo <- function(ll) {
-  loo::loo(ll, cores = 1L)
+# PSIS-LOO pointwise elpd for a block of observations (columns of ll).
+#
+# PSIS-LOO treats every observation (column) separately, so computing it one
+# child at a time gives exactly the same pointwise values as one call on the
+# full draws x observations matrix. Doing it per child matters: with ~15,000
+# draws x ~184,000 observations the full matrix has more elements than
+# loo's internals can handle (> 2^31), which crashes R with a segfault, and
+# it would also need ~22 GB per copy. Warnings from loo (e.g. about r_eff or
+# high Pareto k) are muffled here; high-k counts are tracked by the caller.
+loo_pointwise <- function(ll) {
+  res <- withCallingHandlers(
+    loo::loo(ll, cores = 1L),
+    warning = function(w) invokeRestart("muffleWarning")
+  )
+  list(
+    elpd_loo = res$pointwise[, "elpd_loo"],
+    n_high_k = sum(loo::pareto_k_values(res) > 0.7)
+  )
 }
 
 # Precompute full-model log-likelihood and LOO for outcome y.
@@ -153,8 +168,9 @@ prepare_y_cache <- function(y_dat, y_idx, z_mat, col_lookup, V, K) {
   S     <- nrow(z_mat)
   n_obs <- nrow(y_dat$X)
 
-  ll_full      <- matrix(NA_real_, nrow = S, ncol = n_obs)
-  person_cache <- vector("list", length(unique(y_dat$person_idx)))
+  pointwise_full <- rep(NA_real_, n_obs)
+  n_high_k       <- 0L
+  person_cache   <- vector("list", length(unique(y_dat$person_idx)))
   pc_id        <- 1L
 
   A_q_idx <- as.integer(((seq_len(K) - 1L) * V) + y_idx)
@@ -171,7 +187,9 @@ prepare_y_cache <- function(y_dat, y_idx, z_mat, col_lookup, V, K) {
     eta_full <- Ai %*% t(Xi)
     eta_full <- sweep(eta_full, 1, mui, "+")
 
-    ll_full[, rows] <- loglik_binary(eta_full, yi)
+    lp <- loo_pointwise(loglik_binary(eta_full, yi))
+    pointwise_full[rows] <- lp$elpd_loo
+    n_high_k <- n_high_k + lp$n_high_k
 
     person_cache[[pc_id]] <- list(
       rows     = rows,
@@ -183,22 +201,22 @@ prepare_y_cache <- function(y_dat, y_idx, z_mat, col_lookup, V, K) {
     pc_id <- pc_id + 1L
   }
 
-  loo_full <- run_loo(ll_full)
+  if (n_high_k > 0)
+    message("  Full model: ", n_high_k, " of ", n_obs,
+            " observations have Pareto k > 0.7")
 
   list(
     person_cache   = person_cache,
-    ll_full        = ll_full,
-    loo_full       = loo_full,
-    pointwise_full = loo_full$pointwise[, "elpd_loo"],
+    elpd_full      = sum(pointwise_full),
+    pointwise_full = pointwise_full,
     n_obs          = n_obs
   )
 }
 
 # Score a single x -> y pair against the cached full model.
 score_pair_from_cache <- function(y_cache, x_idx, K_per_pair) {
-  S      <- nrow(y_cache$ll_full)
   n_obs  <- y_cache$n_obs
-  ll_red <- matrix(NA_real_, nrow = S, ncol = n_obs)
+  pointwise_red <- rep(NA_real_, n_obs)
   block_k    <- as.integer(seq_len(K_per_pair) + (x_idx - 1L) * K_per_pair)
   coef_pool  <- numeric(0)
 
@@ -206,7 +224,7 @@ score_pair_from_cache <- function(y_cache, x_idx, K_per_pair) {
     contrib_block <- pc$Ai[, block_k, drop = FALSE] %*% t(pc$Xi[, block_k, drop = FALSE])
     eta_red       <- pc$eta_full - contrib_block
 
-    ll_red[, pc$rows] <- loglik_binary(eta_red, pc$yi)
+    pointwise_red[pc$rows] <- loo_pointwise(loglik_binary(eta_red, pc$yi))$elpd_loo
     coef_pool <- c(coef_pool, as.vector(pc$Ai[, block_k, drop = FALSE]))
   }
 
@@ -220,11 +238,10 @@ score_pair_from_cache <- function(y_cache, x_idx, K_per_pair) {
     "mixed"
   }
 
-  loo_red   <- run_loo(ll_red)
-  elpd_full <- y_cache$loo_full$estimates["elpd_loo", "Estimate"]
-  elpd_red  <- loo_red$estimates["elpd_loo", "Estimate"]
+  elpd_full <- y_cache$elpd_full
+  elpd_red  <- sum(pointwise_red)
   elpd_diff <- elpd_full - elpd_red
-  pt_diff   <- y_cache$pointwise_full - loo_red$pointwise[, "elpd_loo"]
+  pt_diff   <- y_cache$pointwise_full - pointwise_red
   se_diff   <- sqrt(length(pt_diff) * stats::var(pt_diff))
 
   list(
