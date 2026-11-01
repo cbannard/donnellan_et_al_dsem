@@ -6,6 +6,7 @@
 # (Donnellan et al., Phil. Trans. R. Soc. B, RSTB-2025-0407):
 #
 #   Step 1   fitVAR.R                                 16 single-chain fits (1000 warmup + 1000 draws each)
+#   Check    check_convergence.R                      R-hat, ESS, divergences, per-chain checks
 #   Step 1b  granger_analysis.R                       Figure 1 / 72 directed pairs
 #   Step 2a  select_terms_for_individual_behaviours.R one task per behaviour
 #   Step 2b  final_term_weighting.R                   Figure 2 inclusion weights
@@ -20,13 +21,14 @@
 #   stage as its own Slurm job, with dependencies so that each stage starts
 #   only after the stages it needs have finished successfully:
 #
-#       step1 (array 1-16)  ──┬── granger (array) ── granger_combine
+#       step1 (array 1-16)  ──┬── convergence
+#                             ├── granger (array) ── granger_combine
 #                             └── step2a  (array 0-8) ── step2b
 #
 #   To re-run a single stage (e.g. after fixing a failure):
 #
-#       bash run_dsem_pipeline.slurm step2a        # also: step1, granger,
-#                                               #   granger_combine, step2b
+#       bash run_dsem_pipeline.slurm step2a        # also: step1, convergence,
+#                                               #   granger, granger_combine, step2b
 #
 #   Step 2 seeds: by default each Step 2 job draws a random seed and records
 #   it (log + output .rds). To reproduce a run:  STEP2_SEED=12345 bash run_dsem_pipeline.slurm step2b
@@ -43,6 +45,7 @@
 #   MODELS-STEP1/dsem_selection_<b>_single_behaviour.rds  Step 2a
 #   MODELS-STEP1/dsem_selection_from_single_behaviour_sets_stacking_coefs.csv
 #                                                       Step 2b final weights
+#   CONVERGENCE/convergence_report.txt                  Step 1 convergence summary (+ CSVs, plots)
 #   logs/                                               one log per task
 #
 # Cluster settings below match the original runs (CSF3-style "himem"
@@ -63,6 +66,7 @@ TIME_LONG="7-0"                      # wall time for model-fitting stages
 MEM_STEP1="${MEM_STEP1:-}"           # blank = partition default (as originally run)
 MEM_GRANGER="${MEM_GRANGER:-512G}"   # original Granger job used 512G
 MEM_STEP2="${MEM_STEP2:-256G}"       # steps 2a/2b load all step-1 files at once
+MEM_CONV="${MEM_CONV:-128G}"         # convergence check holds all chains' draws
 
 STEP2_SEED="${STEP2_SEED:-}"         # blank = each Step 2 job draws a random seed
                                       #   (printed in its log and saved in its .rds);
@@ -130,7 +134,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
 
   # --- preflight checks ---
   for f in fitVAR.R granger_analysis.R select_terms_for_individual_behaviours.R \
-           final_term_weighting.R CDI_data.csv; do
+           final_term_weighting.R check_convergence.R CDI_data.csv; do
     [[ -f "$REPO_DIR/$f" ]] || { echo "Missing $REPO_DIR/$f" >&2; exit 1; }
   done
   mkdir -p "$RUN_DIR" 2>/dev/null && [[ -w "$RUN_DIR" ]] \
@@ -164,6 +168,11 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     J1=$(submit_stage step1 -J dsem_step1 -t "$TIME_LONG" $(mem_flag "$MEM_STEP1") \
            --array=1-"$N_CHAINS" -o "$LOG_DIR/step1_%a.out")
     echo "Step 1   (fitVAR, $N_CHAINS chains):           job $J1"
+  fi
+  if [[ "$WHAT" == submit || "$WHAT" == convergence ]]; then
+    JC=$(submit_stage convergence -J dsem_convergence -t 1-0 $(mem_flag "$MEM_CONV") \
+           $(dep "$J1") -o "$LOG_DIR/convergence.out")
+    echo "Check    (Step 1 convergence):              job $JC"
   fi
   if [[ "$WHAT" == submit || "$WHAT" == granger ]]; then
     JG=$(submit_stage granger -J dsem_granger -t "$TIME_LONG" $(mem_flag "$MEM_GRANGER") \
@@ -251,6 +260,12 @@ step2a)
     ${STEP2_SEED:+seed=$STEP2_SEED}
   ;;
 
+convergence)
+  banner "Convergence check of Step 1 fits"
+  load_r; use_private_tmp
+  Rscript "$REPO_DIR/check_convergence.R" "$STEP1_DIR" "$RUN_DIR/CONVERGENCE"
+  ;;
+
 step2b)
   banner "Step 2b: final_term_weighting.R"
   load_r; use_private_tmp
@@ -262,7 +277,7 @@ step2b)
   ;;
 
 *)
-  echo "Unknown stage '$STAGE'. Use: submit | step1 | granger | granger_combine | step2a | step2b" >&2
+  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | step2a | step2b" >&2
   exit 1
   ;;
 esac
