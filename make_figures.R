@@ -5,11 +5,17 @@
 #
 # Usage:
 #   Rscript make_figures.R <run_dir> [output_folder] [figure=1|2|both] [threshold=0.333]
+#                          [rule=mean|pop] [prob=0.95]
 #
 #   run_dir        the pipeline's RUN_DIR (holds GRANGER/ and MODELS-STEP1/)
 #   output_folder  default: <run_dir>/FIGURES
 #   figure=        which figure to draw: 1, 2 or both (default both)
 #   threshold=     Figure 2 inclusion-weight cut-off (default 1/3, as in the paper)
+#   rule=          Figure 1 "positive relation" rule:
+#                    mean (default) — pooled mean lag coefficient > 0
+#                    pop  — population-level effect (A_pop summed over the 5 lags)
+#                           with P(effect > 0) >= prob; needs granger_direction.R output
+#   prob=          probability cut-off for rule=pop (default 0.95)
 #
 # Figure 1 (Step 1b, granger_analysis.R)
 #   Input: GRANGER/granger_loocv_pairwise_elpd.csv
@@ -44,11 +50,17 @@ which_fig <- if (length(fig_arg)) tolower(fig_arg[length(fig_arg)]) else "both"
 if (!which_fig %in% c("1", "2", "both")) stop("figure= must be 1, 2 or both")
 do_fig1 <- which_fig %in% c("1", "both")
 do_fig2 <- which_fig %in% c("2", "both")
+rule_arg  <- sub("^rule=", "", keyed[grepl("^rule=", keyed)])
+fig1_rule <- if (length(rule_arg)) tolower(rule_arg[length(rule_arg)]) else "mean"
+if (!fig1_rule %in% c("mean", "pop")) stop("rule= must be mean or pop")
+prob_arg  <- sub("^prob=", "", keyed[grepl("^prob=", keyed)])
+fig1_prob <- if (length(prob_arg)) as.numeric(prob_arg) else 0.95
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
 suppressPackageStartupMessages(library(ggplot2))
 
-granger_csv <- file.path(run_dir, "GRANGER", "granger_loocv_pairwise_elpd.csv")
+granger_csv <- file.path(run_dir, "GRANGER",
+                         if (fig1_rule == "pop") "granger_direction.csv" else "granger_loocv_pairwise_elpd.csv")
 coefs_csv   <- file.path(run_dir, "MODELS-STEP1",
                          "dsem_selection_from_single_behaviour_sets_stacking_coefs.csv")
 
@@ -158,13 +170,15 @@ key_line <- function(data, params, size) {
 # Figure 1
 # =============================================================================
 if (!do_fig1) {
-  # Figure 1 not requested
+  message("Figure 1 not requested (figure=", which_fig, ")")
 } else if (file.exists(granger_csv)) {
   g <- read.csv(granger_csv, stringsAsFactors = FALSE)
-  shown <- g[g$elpd_diff_full_minus_reduced > 0 & g$mean_coef_x_to_y > 0, ]
+  positive <- if (fig1_rule == "pop") g$pop_prob_positive >= fig1_prob else g$mean_coef_x_to_y > 0
+  rule_txt <- if (fig1_rule == "pop") sprintf("population effect P(> 0) >= %.2f", fig1_prob) else "mean coefficient > 0"
+  shown <- g[g$elpd_diff_full_minus_reduced > 0 & positive, ]
   shown <- shown[order(shown$z_score), ]
-  message(sprintf("Figure 1: %d of %d directed pairs shown (ELPD improved and positive coefficient); %d with z > 2",
-                  nrow(shown), nrow(g), sum(shown$z_score > 2, na.rm = TRUE)))
+  message(sprintf("Figure 1: %d of %d directed pairs shown (ELPD improved and %s); %d with z > 2",
+                  nrow(shown), nrow(g), rule_txt, sum(shown$z_score > 2, na.rm = TRUE)))
   write.csv(shown, file.path(out_dir, "figure1_edges.csv"), row.names = FALSE)
 
   e <- edge_geometry(data.frame(from = shown$predictor_x, to = shown$outcome_y,
@@ -187,14 +201,15 @@ if (!do_fig1) {
   p1 <- add_nodes(p1)
   save_fig(p1, "figure1_granger_network")
 } else {
-  message("Figure 1 skipped: ", granger_csv, " not found (run granger + granger_combine first)")
+  message("Figure 1 skipped: ", granger_csv, " not found (run granger + granger_combine first",
+          if (fig1_rule == "pop") ", then granger_direction" else "", ")")
 }
 
 # =============================================================================
 # Figure 2
 # =============================================================================
 if (!do_fig2) {
-  # Figure 2 not requested
+  message("Figure 2 not requested (figure=", which_fig, ")")
 } else if (file.exists(coefs_csv)) {
   cf <- read.csv(coefs_csv, stringsAsFactors = FALSE)
   is_A  <- grepl("^A\\[", cf$term_label)

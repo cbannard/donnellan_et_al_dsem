@@ -8,6 +8,7 @@
 #   Step 1   fitVAR.R                                 16 single-chain fits (1000 warmup + 1000 draws each)
 #   Check    check_convergence.R                      R-hat, ESS, divergences, per-chain checks
 #   Step 1b  granger_analysis.R                       Figure 1 / 72 directed pairs
+#   Step 1c  granger_direction.R                      population-level direction of each pair
 #   Step 2a  select_terms_for_individual_behaviours.R one task per behaviour
 #   Step 2b  final_term_weighting.R                   Figure 2 inclusion weights
 #   Figures  make_figures.R                           Figures 1 and 2 (network plots)
@@ -23,18 +24,22 @@
 #   only after the stages it needs have finished successfully:
 #
 #       step1 (array 1-16)  ──┬── convergence
-#                             ├── granger (array) ── granger_combine ──┐
+#                             ├── granger (array) ── granger_combine ──┬── granger_direction
+#                             │                                         │
 #                             └── step2a  (array 0-8) ── step2b ───────┴── figures
 #
 #   To re-run a single stage (e.g. after fixing a failure):
 #
 #       bash run_dsem_pipeline.slurm step2a        # also: step1, convergence,
-#                                               #   granger, granger_combine, step2b, figures
+#                                               #   granger, granger_combine, granger_direction,
+#                                               #   step2b, figures
 #
 #   Step 2 seeds: by default each Step 2 job draws a random seed and records
 #   it (log + output .rds). To reproduce a run:  STEP2_SEED=12345 bash run_dsem_pipeline.slurm step2b
 #
 #   Figures can be drawn one at a time:  FIGURE=1 bash run_dsem_pipeline.slurm figures
+#   Figure 1 with the population-level positive rule (needs granger_direction):
+#       FIGURE=1 FIG1_RULE=pop FIG1_PROB=0.95 bash run_dsem_pipeline.slurm figures
 #
 #   Step 1 skips chains whose dsem_step1_<n>.rds already exists, so
 #   re-submitting step1 only reruns missing or failed chains.
@@ -49,6 +54,7 @@
 #   MODELS-STEP1/dsem_selection_from_single_behaviour_sets_stacking_coefs.csv
 #                                                       Step 2b final weights
 #   CONVERGENCE/convergence_report.txt                  Step 1 convergence summary (+ CSVs, plots)
+#   GRANGER/granger_direction.csv                       pairs + population-level P(effect > 0)
 #   FIGURES/figure1_granger_network.{pdf,png}            Figure 1 (+ figure1_edges.csv)
 #   FIGURES/figure2_vocabulary_network.{pdf,png}         Figure 2 (+ figure2_terms.csv)
 #   logs/                                               one log per task
@@ -74,6 +80,8 @@ MEM_STEP2="${MEM_STEP2:-256G}"       # steps 2a/2b load all step-1 files at once
 MEM_CONV="${MEM_CONV:-128G}"         # convergence check holds all chains' draws
 
 FIGURE="${FIGURE:-both}"             # figures stage: 1, 2 or both
+FIG1_RULE="${FIG1_RULE:-mean}"       # Figure 1 positive rule: mean or pop
+FIG1_PROB="${FIG1_PROB:-0.95}"       # probability cut-off when FIG1_RULE=pop
 STEP2_SEED="${STEP2_SEED:-}"         # blank = each Step 2 job draws a random seed
                                       #   (printed in its log and saved in its .rds);
                                       #   set a number to reproduce an earlier run
@@ -120,7 +128,7 @@ banner() {
 submit_stage() {
   local stage="$1"; shift
   sbatch --parsable -p "$PARTITION" -n 1 \
-    --export=ALL,STAGE="$stage",REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR",STEP2_SEED="$STEP2_SEED",FIGURE="$FIGURE" \
+    --export=ALL,STAGE="$stage",REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR",STEP2_SEED="$STEP2_SEED",FIGURE="$FIGURE",FIG1_RULE="$FIG1_RULE",FIG1_PROB="$FIG1_PROB" \
     "$@" "$SELF"
 }
 
@@ -140,7 +148,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
 
   # --- preflight checks ---
   for f in fitVAR.R granger_analysis.R select_terms_for_individual_behaviours.R \
-           final_term_weighting.R check_convergence.R make_figures.R CDI_data.csv; do
+           final_term_weighting.R check_convergence.R make_figures.R granger_direction.R CDI_data.csv; do
     [[ -f "$REPO_DIR/$f" ]] || { echo "Missing $REPO_DIR/$f" >&2; exit 1; }
   done
   mkdir -p "$RUN_DIR" 2>/dev/null && [[ -w "$RUN_DIR" ]] \
@@ -189,6 +197,11 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     JGC=$(submit_stage granger_combine -J dsem_granger_combine -t 0-2 --mem=8G \
             $(dep "$JG") -o "$LOG_DIR/granger_combine.out")
     echo "Step 1b  (combine Granger shards):          job $JGC"
+  fi
+  if [[ "$WHAT" == submit || "$WHAT" == granger_direction ]]; then
+    JGD=$(submit_stage granger_direction -J dsem_granger_direction -t 0-6 --mem=64G \
+            $(dep "$JGC") -o "$LOG_DIR/granger_direction.out")
+    echo "Step 1c  (population-level direction):      job $JGD"
   fi
   if [[ "$WHAT" == submit || "$WHAT" == step2a ]]; then
     J2A=$(submit_stage step2a -J dsem_step2a -t "$TIME_LONG" $(mem_flag "$MEM_STEP2") \
@@ -278,10 +291,17 @@ convergence)
   Rscript "$REPO_DIR/check_convergence.R" "$STEP1_DIR" "$RUN_DIR/CONVERGENCE"
   ;;
 
+granger_direction)
+  banner "Step 1c: granger_direction.R"
+  load_r
+  Rscript "$REPO_DIR/granger_direction.R" "$RUN_DIR"
+  ;;
+
 figures)
   banner "Figures 1 and 2"
   load_r
-  Rscript "$REPO_DIR/make_figures.R" "$RUN_DIR" "$RUN_DIR/FIGURES" figure="$FIGURE"
+  Rscript "$REPO_DIR/make_figures.R" "$RUN_DIR" "$RUN_DIR/FIGURES" figure="$FIGURE" \
+    rule="$FIG1_RULE" prob="$FIG1_PROB"
   ;;
 
 step2b)
@@ -295,7 +315,7 @@ step2b)
   ;;
 
 *)
-  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | step2a | step2b | figures" >&2
+  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | granger_direction | step2a | step2b | figures" >&2
   exit 1
   ;;
 esac
