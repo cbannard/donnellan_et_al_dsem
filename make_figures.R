@@ -152,10 +152,31 @@ add_nodes <- function(p, ring = NULL, loop_nodes = character(0)) {
                 fontface = "bold", colour = "#1F2A44")
 }
 
+# PNG output on a cluster node: the default png() device needs an X11
+# display, which batch jobs don't have. Use ragg if installed, otherwise
+# the cairo-based png(); if neither is available, write the PDF only.
+png_device <- function() {
+  if (requireNamespace("ragg", quietly = TRUE)) return(ragg::agg_png)
+  if (isTRUE(capabilities("cairo")))
+    return(function(filename, width, height, res, units, ...)
+      grDevices::png(filename = filename, width = width, height = height,
+                     res = res, units = units, type = "cairo", ...))
+  NULL
+}
+
 save_fig <- function(p, stem, w = 9, h = 7) {
-  ggsave(file.path(out_dir, paste0(stem, ".pdf")), p, width = w, height = h)
-  ggsave(file.path(out_dir, paste0(stem, ".png")), p, width = w, height = h, dpi = 300)
-  message("Saved ", file.path(out_dir, paste0(stem, ".pdf/.png")))
+  pdf_file <- file.path(out_dir, paste0(stem, ".pdf"))
+  ggsave(pdf_file, p, width = w, height = h, device = grDevices::pdf)
+  message("Saved ", pdf_file)
+  dev_png <- png_device()
+  png_file <- file.path(out_dir, paste0(stem, ".png"))
+  if (is.null(dev_png)) {
+    message("PNG skipped: no display-free PNG device (install the 'ragg' package to enable it)")
+  } else {
+    ok <- tryCatch({ ggsave(png_file, p, width = w, height = h, dpi = 300, device = dev_png); TRUE },
+                   error = function(e) { message("PNG skipped: ", conditionMessage(e)); FALSE })
+    if (ok) message("Saved ", png_file)
+  }
 }
 
 arrow_spec <- arrow(length = unit(0.16, "inches"), type = "closed", angle = 22)

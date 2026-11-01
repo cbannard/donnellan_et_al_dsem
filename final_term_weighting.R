@@ -18,6 +18,23 @@
 #
 #   w_final(q) = outer_inclusion(behaviour(q)) × inner_inclusion(q | behaviour)
 #
+# Which blocks of each behaviour enter the outer search (blocks= option):
+#   blocks=min (default) — only blocks whose Step 2a inclusion weight is at
+#       least min_inner (default 0.5). Their Step 2a weights stay as the
+#       inner weights, so w_final = outer x inner as described above. A
+#       behaviour with no block reaching min_inner is left out. This keeps
+#       the outer models small enough not to overfit with 58 children.
+#   blocks=best — only the blocks of that behaviour's single best
+#       Step 2a model (highest ELPD), as in the original pipeline's
+#       dsem_step2_selection_single_behaviour.R. A behaviour whose best model
+#       does not beat the intercept-only model is left out. Each selected
+#       block's inner weight is set to 1, so a term's final weight is the
+#       outer inclusion weight of its behaviour.
+#   blocks=all — every block with a non-zero Step 2a inclusion weight
+#       (in practice all 10 blocks, ~46 predictors per behaviour), with the
+#       Step 2a inclusion weights as inner weights. With 58 children this
+#       overfits badly once 2-3 behaviours are combined.
+#
 # This gives fine-grained inclusion probabilities at the level of individual
 # x→y predictor pairs and means, without requiring an exhaustive search
 # over the full 2^90 predictor-block space (9 behaviours x 10 blocks).
@@ -26,6 +43,7 @@
 #
 # Usage:
 #   Rscript final_term_weighting.R [selection_folder] [step1_folder] [output_prefix] [seed=<int>]
+#                                  [blocks=min|best|all] [min_inner=0.5]
 #
 # Without seed=, a random seed is drawn; it is printed and saved as $seed in
 # <output_prefix>.rds so the run can be repeated exactly. A resumed run
@@ -54,6 +72,13 @@ pos_args <- args[!grepl("=", args)]
 selection_folder <- if (length(pos_args) >= 1) pos_args[1] else "MODELS-DSEM"
 step1_folder <- if (length(pos_args) >= 2) pos_args[2] else selection_folder
 output_prefix <- if (length(pos_args) >= 3) pos_args[3] else "dsem_selection_from_single_behaviour_sets"
+blocks_arg <- sub("^(--)?blocks=", "", grep("^(--)?blocks=", args, value = TRUE))
+block_mode <- if (length(blocks_arg)) tolower(blocks_arg[length(blocks_arg)]) else "min"
+if (!block_mode %in% c("min", "best", "all")) stop("blocks= must be min, best or all")
+mi_arg    <- sub("^(--)?min_inner=", "", grep("^(--)?min_inner=", args, value = TRUE))
+min_inner <- if (length(mi_arg)) as.numeric(mi_arg[length(mi_arg)]) else 0.5
+if (!is.finite(min_inner) || min_inner < 0 || min_inner > 1) stop("min_inner must be between 0 and 1")
+message("Block mode: ", block_mode, if (block_mode == "min") paste0(" (min_inner = ", min_inner, ")") else "")
 
 is_dir <- function(path) {
   info <- suppressWarnings(file.info(path)$isdir)
@@ -147,6 +172,7 @@ extract_single_behaviour_record <- function(obj) {
       return(list(
         behaviour       = as.character(gs$behaviour),
         block_inclusion = gs$block_inclusion,  # data frame: block_idx, block_label, inclusion_weight, effect_direction
+        combo_summary   = gs$combo_summary,    # one row per block combination, with elpd / elpd_diff
         n_cc            = as.integer(gs$n_cc)
       ))
     }
@@ -401,6 +427,38 @@ for (b in names(single_records)) {
     stop("Selection file for '", b, "' contains a Log-var block. ",
          "Re-run select_terms_for_individual_behaviours.R with the current code.")
 
+  # blocks=best: keep only the blocks of this behaviour's best Step 2a model.
+  if (block_mode == "best" && !is.null(rec$combo_summary) && nrow(rec$combo_summary) > 0) {
+    cs   <- rec$combo_summary
+    best <- cs[which.max(cs$elpd), , drop = FALSE]
+    if (!(best$elpd_diff > 0)) {
+      message(sprintf("  %-14s best model (%s) does not beat intercept-only (elpd_diff %.2f): behaviour left out",
+                      b, best$combo_label, best$elpd_diff))
+      bi <- bi[0, , drop = FALSE]
+    } else {
+      best_labels <- strsplit(best$combo_label, "+", fixed = TRUE)[[1]]
+      if (!all(best_labels %in% bi$block_label))
+        stop("Could not match best-model blocks for '", b, "': ", best$combo_label)
+      bi <- bi[bi$block_label %in% best_labels, , drop = FALSE]
+      bi$inclusion_weight <- 1
+      message(sprintf("  %-14s best model: %s  (elpd_diff vs intercept-only %.2f)",
+                      b, best$combo_label, best$elpd_diff))
+    }
+  }
+
+  # blocks=min: keep only blocks with Step 2a inclusion weight >= min_inner.
+  if (block_mode == "min") {
+    keep <- bi$inclusion_weight >= min_inner
+    if (!any(keep)) {
+      message(sprintf("  %-14s no block with inclusion weight >= %.2f (max %.3f): behaviour left out",
+                      b, min_inner, max(c(0, bi$inclusion_weight))))
+    } else {
+      message(sprintf("  %-14s blocks kept: %s", b,
+                      paste(sprintf("%s (%.2f)", bi$block_label[keep], bi$inclusion_weight[keep]), collapse = ", ")))
+    }
+    bi <- bi[keep, , drop = FALSE]
+  }
+
   # Only consider blocks that exist and have nonzero inclusion weight.
   bi <- bi[is.finite(bi$block_idx) &
            bi$block_idx >= 1L &
@@ -437,7 +495,9 @@ for (b in names(single_records)) {
 
 selected_q_by_behaviour <- selected_q_by_behaviour[lengths(selected_q_by_behaviour) > 0]
 if (length(selected_q_by_behaviour) == 0) {
-  stop("No behaviours had blocks with nonzero inner inclusion weight")
+  stop("No behaviour has any block meeting the selection rule (blocks=", block_mode,
+       if (block_mode == "min") paste0(", min_inner=", min_inner) else "", "). ",
+       "Try a lower min_inner.")
 }
 
 candidate_behaviours <- sort(names(selected_q_by_behaviour))
@@ -828,7 +888,9 @@ saveRDS(
     selected_q_by_behaviour = selected_q_by_behaviour,
     prior_sd_sigma          = prior_sd_sigma,
     min_n_frac              = min_n_frac,
-    seed                    = base_seed
+    seed                    = base_seed,
+    block_mode              = block_mode,
+    min_inner               = if (block_mode == "min") min_inner else NA_real_
   ),
   out_rds
 )

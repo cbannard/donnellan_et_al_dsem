@@ -37,6 +37,10 @@
 #   Step 2 seeds: by default each Step 2 job draws a random seed and records
 #   it (log + output .rds). To reproduce a run:  STEP2_SEED=12345 bash run_dsem_pipeline.slurm step2b
 #
+#   Step 2b keeps, for each behaviour, only blocks whose Step 2a inclusion
+#   weight is >= 0.5. Change with e.g.  STEP2B_MIN_INNER=0.4 bash run_dsem_pipeline.slurm step2b
+#   (or STEP2B_BLOCKS=best / all for the other block-selection modes).
+#
 #   Figures can be drawn one at a time:  FIGURE=1 bash run_dsem_pipeline.slurm figures
 #   Figure 1 with the population-level positive rule (needs granger_direction):
 #       FIGURE=1 FIG1_RULE=pop FIG1_PROB=0.95 bash run_dsem_pipeline.slurm figures
@@ -79,6 +83,8 @@ MEM_GRANGER="${MEM_GRANGER:-512G}"   # original Granger job used 512G
 MEM_STEP2="${MEM_STEP2:-256G}"       # steps 2a/2b load all step-1 files at once
 MEM_CONV="${MEM_CONV:-128G}"         # convergence check holds all chains' draws
 
+STEP2B_BLOCKS="${STEP2B_BLOCKS:-min}"    # step2b: which Step 2a blocks enter (min | best | all)
+STEP2B_MIN_INNER="${STEP2B_MIN_INNER:-0.5}"  # step2b: inclusion-weight cut-off for blocks=min
 FIGURE="${FIGURE:-both}"             # figures stage: 1, 2 or both
 FIG1_RULE="${FIG1_RULE:-mean}"       # Figure 1 positive rule: mean or pop
 FIG1_PROB="${FIG1_PROB:-0.95}"       # probability cut-off when FIG1_RULE=pop
@@ -128,7 +134,7 @@ banner() {
 submit_stage() {
   local stage="$1"; shift
   sbatch --parsable -p "$PARTITION" -n 1 \
-    --export=ALL,STAGE="$stage",REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR",STEP2_SEED="$STEP2_SEED",FIGURE="$FIGURE",FIG1_RULE="$FIG1_RULE",FIG1_PROB="$FIG1_PROB" \
+    --export=ALL,STAGE="$stage",REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR",STEP2_SEED="$STEP2_SEED",FIGURE="$FIGURE",FIG1_RULE="$FIG1_RULE",FIG1_PROB="$FIG1_PROB",STEP2B_BLOCKS="$STEP2B_BLOCKS",STEP2B_MIN_INNER="$STEP2B_MIN_INNER" \
     "$@" "$SELF"
 }
 
@@ -311,7 +317,7 @@ step2b)
   echo "Found $n_sel Step 2a selection files (expect ${#BEHAVIOURS[@]})"
   cd "$REPO_DIR"                 # script reads ./CDI_data.csv
   Rscript "$REPO_DIR/final_term_weighting.R" "$STEP1_DIR" "$STEP1_DIR" "$STEP2B_PREFIX" \
-    ${STEP2_SEED:+seed=$STEP2_SEED}
+    ${STEP2_SEED:+seed=$STEP2_SEED} blocks="$STEP2B_BLOCKS" min_inner="$STEP2B_MIN_INNER"
   ;;
 
 *)
