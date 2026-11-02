@@ -18,6 +18,19 @@
 #
 #   w_final(q) = outer_inclusion(behaviour(q)) × inner_inclusion(q | behaviour)
 #
+# Which model weights are summed into inclusion weights (weights= option):
+#   weights=stacking (default) — Bayesian stacking weights (Yao et al. 2018),
+#       at both levels, as described in the paper.
+#   weights=pseudobma — pseudo-BMA+ weights at both levels. Inner weights are
+#       recomputed from the Step 2a pseudo-BMA+ weights saved for every block
+#       combination; outer weights are the pseudo-BMA+ weights of the Step 2b
+#       behaviour combinations. Stacking chooses the best *mixture* of models,
+#       so with hundreds of near-equivalent models and 58 children its weights
+#       are spread almost arbitrarily and are not model probabilities;
+#       pseudo-BMA+ weights reflect each model's own cross-validated
+#       performance. With either weighting, a block that makes no difference
+#       sits near 0.5 (each block is in half of all combinations).
+#
 # Which blocks of each behaviour enter the outer search (blocks= option):
 #   blocks=min (default) — only blocks whose Step 2a inclusion weight is at
 #       least min_inner (default 0.5). Their Step 2a weights stay as the
@@ -43,7 +56,7 @@
 #
 # Usage:
 #   Rscript final_term_weighting.R [selection_folder] [step1_folder] [output_prefix] [seed=<int>]
-#                                  [blocks=min|best|all] [min_inner=0.5]
+#                                  [blocks=min|best|all] [min_inner=0.5] [weights=stacking|pseudobma]
 #
 # Without seed=, a random seed is drawn; it is printed and saved as $seed in
 # <output_prefix>.rds so the run can be repeated exactly. A resumed run
@@ -78,6 +91,10 @@ if (!block_mode %in% c("min", "best", "all")) stop("blocks= must be min, best or
 mi_arg    <- sub("^(--)?min_inner=", "", grep("^(--)?min_inner=", args, value = TRUE))
 min_inner <- if (length(mi_arg)) as.numeric(mi_arg[length(mi_arg)]) else 0.5
 if (!is.finite(min_inner) || min_inner < 0 || min_inner > 1) stop("min_inner must be between 0 and 1")
+wt_arg      <- sub("^(--)?weights=", "", grep("^(--)?weights=", args, value = TRUE))
+weight_mode <- if (length(wt_arg)) tolower(wt_arg[length(wt_arg)]) else "stacking"
+if (!weight_mode %in% c("stacking", "pseudobma")) stop("weights= must be stacking or pseudobma")
+message("Weights: ", weight_mode)
 message("Block mode: ", block_mode, if (block_mode == "min") paste0(" (min_inner = ", min_inner, ")") else "")
 
 is_dir <- function(path) {
@@ -427,6 +444,18 @@ for (b in names(single_records)) {
     stop("Selection file for '", b, "' contains a Log-var block. ",
          "Re-run select_terms_for_individual_behaviours.R with the current code.")
 
+  # weights=pseudobma: replace the Step 2a (stacking) inner weights with the
+  # sum of Step 2a pseudo-BMA+ weights over the block combinations that
+  # contain each block.
+  if (weight_mode == "pseudobma") {
+    cs <- rec$combo_summary
+    if (is.null(cs) || !"pseudobma_weight" %in% names(cs))
+      stop("Selection file for '", b, "' has no per-combination pseudo-BMA+ weights")
+    parts <- strsplit(cs$combo_label, "+", fixed = TRUE)
+    bi$inclusion_weight <- vapply(bi$block_label, function(l)
+      sum(cs$pseudobma_weight[vapply(parts, function(s) l %in% s, logical(1))]), numeric(1))
+  }
+
   # blocks=best: keep only the blocks of this behaviour's best Step 2a model.
   if (block_mode == "best" && !is.null(rec$combo_summary) && nrow(rec$combo_summary) > 0) {
     cs   <- rec$combo_summary
@@ -765,17 +794,18 @@ message(sprintf(
 # ---------------------------------------------------------------------------
 message("Computing two-level term inclusion weights...")
 
-# Step 1: outer inclusion weight per behaviour — sum outer stacking weights
-# over all combos containing that behaviour.
+# Step 1: outer inclusion weight per behaviour — sum the outer model weights
+# (stacking or pseudo-BMA+, per weights=) over all combos containing it.
+outer_w_name <- if (weight_mode == "pseudobma") "pseudobma_weight" else "stacking_weight"
 nonzero_combo_idx <- which(
-  !vapply(results, function(r) is.null(r) || is.na(r$stacking_weight) || r$stacking_weight == 0,
+  !vapply(results, function(r) is.null(r) || is.na(r[[outer_w_name]]) || r[[outer_w_name]] == 0,
           logical(1))
 )
 
 outer_inclusion <- setNames(numeric(length(candidate_behaviours)), candidate_behaviours)
 for (ii in nonzero_combo_idx) {
   bset  <- combos[[ii]]
-  w_raw <- results[[ii]]$stacking_weight
+  w_raw <- results[[ii]][[outer_w_name]]
   for (b in bset) outer_inclusion[b] <- outer_inclusion[b] + w_raw
 }
 
@@ -890,6 +920,7 @@ saveRDS(
     min_n_frac              = min_n_frac,
     seed                    = base_seed,
     block_mode              = block_mode,
+    weight_mode             = weight_mode,
     min_inner               = if (block_mode == "min") min_inner else NA_real_
   ),
   out_rds
