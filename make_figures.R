@@ -4,14 +4,29 @@
 # Draws Figures 1 and 2 (network diagrams) from the pipeline's outputs.
 #
 # Usage:
-#   Rscript make_figures.R <run_dir> [output_folder] [figure=1|2|both] [threshold=0.333]
+#   Rscript make_figures.R <run_dir> [output_folder] [figure=1|2|both] [threshold=0.01|perm|<p>]
 #                          [rule=mean|pop] [prob=0.95] [z=z_score|z_child|z_block]
-#                          [show=all|strong]
+#                          [show=all|strong] [perm=auto|0] [alpha=0.05]
 #
 #   run_dir        the pipeline's RUN_DIR (holds GRANGER/ and MODELS-STEP1/)
 #   output_folder  default: <run_dir>/FIGURES
 #   figure=        which figure to draw: 1, 2 or both (default both)
-#   threshold=     Figure 2 inclusion-weight cut-off (default 1/3, as in the paper)
+#   threshold=     which Figure 2 blocks are drawn:
+#                    0.01 (default) — every block with a final inclusion
+#                         probability of at least 0.01, i.e. all blocks with
+#                         non-negligible weight; line width shows the weight.
+#                         This is a display floor, not an evidential threshold.
+#                    perm — only blocks above the permutation-calibrated
+#                         threshold: the 95th percentile, over the permutation
+#                         runs, of the LARGEST final inclusion probability of
+#                         any block (needs permutation_null.R output). A block
+#                         above it has a familywise permutation p < .05.
+#                    <number> — any other cut-off (the original paper used 1/3)
+#   perm=          Figure 2 line style from the permutation null (default auto:
+#                  used when PERMUTATIONS/permutation_null_blocks.csv exists):
+#                  solid = familywise permutation p (p_final_max) < alpha,
+#                  dashed = not; perm=0 draws all lines solid
+#   alpha=         significance level for perm (default 0.05)
 #   rule=          Figure 1 "positive relation" rule:
 #                    mean (default) — pooled mean lag coefficient > 0
 #                    pop  — population-level effect (A_pop summed over the 5 lags)
@@ -51,7 +66,15 @@ pos_args  <- args[!grepl("=", args)]
 run_dir   <- pos_args[1]
 out_dir   <- if (length(pos_args) >= 2) pos_args[2] else file.path(run_dir, "FIGURES")
 thr_arg   <- sub("^threshold=", "", keyed[grepl("^threshold=", keyed)])
-threshold <- if (length(thr_arg)) as.numeric(thr_arg) else 1/3
+thr_mode  <- if (length(thr_arg)) thr_arg[length(thr_arg)] else "0.01"
+threshold <- if (thr_mode == "perm") NA_real_ else suppressWarnings(as.numeric(thr_mode))
+if (thr_mode != "perm" && (is.na(threshold) || threshold < 0 || threshold > 1))
+  stop("threshold= must be perm or a number between 0 and 1")
+perm_arg  <- sub("^perm=", "", keyed[grepl("^perm=", keyed)])
+perm_mode <- if (length(perm_arg)) tolower(perm_arg[length(perm_arg)]) else "auto"
+if (!perm_mode %in% c("auto", "0", "1")) stop("perm= must be auto, 0 or 1")
+alpha_arg <- sub("^alpha=", "", keyed[grepl("^alpha=", keyed)])
+perm_alpha <- if (length(alpha_arg)) as.numeric(alpha_arg) else 0.05
 fig_arg   <- sub("^figure=", "", keyed[grepl("^figure=", keyed)])
 which_fig <- if (length(fig_arg)) tolower(fig_arg[length(fig_arg)]) else "both"
 if (!which_fig %in% c("1", "2", "both")) stop("figure= must be 1, 2 or both")
@@ -76,6 +99,8 @@ granger_csv <- file.path(run_dir, "GRANGER",
                          if (fig1_rule == "pop") "granger_direction.csv" else "granger_loocv_pairwise_elpd.csv")
 coefs_csv   <- file.path(run_dir, "MODELS-STEP1",
                          "dsem_selection_from_single_behaviour_sets_stacking_coefs.csv")
+perm_blocks_csv <- file.path(run_dir, "PERMUTATIONS", "permutation_null_blocks.csv")
+perm_global_csv <- file.path(run_dir, "PERMUTATIONS", "permutation_null_global.csv")
 
 # -----------------------------------------------------------------------------
 # Layout: same node positions as the paper, clockwise from the top.
@@ -274,49 +299,91 @@ if (!do_fig2) {
     direction = b$effect_direction[which.max(b$inclusion_weight)], stringsAsFactors = FALSE)))
   blocks <- if (is.null(blocks)) data.frame(from = character(0), to = character(0),
                                             weight = numeric(0), direction = character(0)) else blocks
+
+  # Permutation-calibrated threshold: 95th percentile of the largest final
+  # inclusion probability in the permutation runs.
+  if (thr_mode == "perm") {
+    if (!file.exists(perm_global_csv)) stop("threshold=perm needs ", perm_global_csv, " (run perm_summary)")
+    pg <- read.csv(perm_global_csv, stringsAsFactors = FALSE)
+    threshold <- pg$null_q95[pg$statistic == "max_final_inclusion"]
+    if (length(threshold) != 1 || !is.finite(threshold))
+      stop("No max_final_inclusion row in ", perm_global_csv, " (re-run permutation_null.R)")
+    message(sprintf("Permutation-calibrated threshold: %.3f", threshold))
+  }
+
+  # Permutation p-values (familywise) for the line style.
+  use_perm <- perm_mode == "1" || (perm_mode == "auto" && file.exists(perm_blocks_csv))
+  if (use_perm && !file.exists(perm_blocks_csv)) stop("perm=1 needs ", perm_blocks_csv)
+  p_lookup <- if (use_perm) {
+    pb <- read.csv(perm_blocks_csv, stringsAsFactors = FALSE)
+    setNames(pb$p_final_max, pb$block)
+  } else NULL
+  block_key <- function(from, to) paste0(from, " -> ", to)
+
   edges <- blocks[blocks$weight >= threshold, ]
   edges <- edges[order(edges$weight), ]
+  edges$p_perm <- if (use_perm && nrow(edges) > 0) unname(p_lookup[block_key(edges$from, edges$to)]) else rep(NA_real_, nrow(edges))
+  edges$sig <- factor(ifelse(!is.na(edges$p_perm) & edges$p_perm < perm_alpha, "sig", "ns"),
+                      levels = c("sig", "ns"))
 
   mu <- cf[is_mu, ]
   mu$behaviour <- sub("^mu\\[(.+)\\]$", "\\1", mu$term_label)
   mu_in <- mu[mu$inclusion_weight >= threshold, ]
+  mu_in$p_perm <- if (use_perm && nrow(mu_in) > 0) unname(p_lookup[paste0("mean ", mu_in$behaviour)]) else rep(NA_real_, nrow(mu_in))
 
-  message(sprintf("Figure 2: %d lag blocks (of %d) and %d means with inclusion weight >= %.3f",
-                  nrow(edges), nrow(blocks), nrow(mu_in), threshold))
+  message(sprintf("Figure 2: %d lag blocks (of %d) and %d means with final inclusion >= %.3f%s",
+                  nrow(edges), nrow(blocks), nrow(mu_in), threshold,
+                  if (use_perm) sprintf("; %d lag blocks and %d means with permutation p < %.2f (familywise)",
+                                        sum(edges$sig == "sig"), sum(!is.na(mu_in$p_perm) & mu_in$p_perm < perm_alpha),
+                                        perm_alpha) else ""))
   write.csv(rbind(
     data.frame(type = ifelse(edges$from == edges$to, "self-lag", "cross-lag"),
-               from = edges$from, to = edges$to, weight = edges$weight, direction = edges$direction),
+               from = edges$from, to = edges$to, weight = edges$weight, direction = edges$direction,
+               p_perm_familywise = edges$p_perm),
     data.frame(type = rep("mean", nrow(mu_in)), from = mu_in$behaviour, to = mu_in$behaviour,
-               weight = mu_in$inclusion_weight, direction = mu_in$effect_direction)),
+               weight = mu_in$inclusion_weight, direction = mu_in$effect_direction,
+               p_perm_familywise = mu_in$p_perm)),
     file.path(out_dir, "figure2_terms.csv"), row.names = FALSE)
 
   dir_col <- c(positive = RED, negative = BLUE)
   cross   <- edge_geometry(edges[edges$from != edges$to, ])
   loops   <- loop_paths(edges[edges$from == edges$to, ])
-  wlim    <- c(threshold, 1)
+  wlim    <- c(0, 1)
+  # With the permutation null, line type marks familywise significance.
+  edge_aes <- if (use_perm)
+    aes(x, y, xend = xend, yend = yend, colour = direction, linewidth = weight, linetype = sig) else
+    aes(x, y, xend = xend, yend = yend, colour = direction, linewidth = weight)
+  loop_aes <- if (use_perm)
+    aes(px, py, group = from, colour = direction, linewidth = weight, linetype = sig) else
+    aes(px, py, group = from, colour = direction, linewidth = weight)
+  lend <- if (use_perm) "butt" else "round"
   p2 <- base_plot()
   if (!is.null(cross) && nrow(cross) > 0) {
     if (any(cross$bidirectional))
-      p2 <- p2 + geom_curve(data = cross[cross$bidirectional, ],
-                            aes(x, y, xend = xend, yend = yend, colour = direction, linewidth = weight),
-                            curvature = 0.25, arrow = arrow_spec, lineend = "round", key_glyph = key_line)
+      p2 <- p2 + geom_curve(data = cross[cross$bidirectional, ], mapping = edge_aes,
+                            curvature = 0.25, arrow = arrow_spec, lineend = lend, key_glyph = key_line)
     if (any(!cross$bidirectional))
-      p2 <- p2 + geom_segment(data = cross[!cross$bidirectional, ],
-                              aes(x, y, xend = xend, yend = yend, colour = direction, linewidth = weight),
-                              arrow = arrow_spec, lineend = "round", key_glyph = key_line)
+      p2 <- p2 + geom_segment(data = cross[!cross$bidirectional, ], mapping = edge_aes,
+                              arrow = arrow_spec, lineend = lend, key_glyph = key_line)
   }
   if (!is.null(loops))
-    p2 <- p2 + geom_path(data = loops, aes(px, py, group = from, colour = direction, linewidth = weight),
+    p2 <- p2 + geom_path(data = loops, mapping = loop_aes,
                          arrow = arrow(length = unit(0.13, "inches"), type = "closed", angle = 22),
-                         lineend = "round", key_glyph = key_line)
+                         lineend = lend, key_glyph = key_line)
   ring <- setNames(mu_in$effect_direction, mu_in$behaviour)
   p2 <- add_nodes(p2, ring = ring, loop_nodes = edges$from[edges$from == edges$to]) +
     scale_colour_manual(values = dir_col, name = "Vocabulary",
                         labels = c(positive = "higher (positive)", negative = "lower (negative)"),
                         drop = FALSE) +
-    scale_linewidth(range = c(0.5, 3), limits = wlim, name = "Inclusion\nweight",
-                    breaks = pretty(wlim, 3)) +
+    scale_linewidth(range = c(0.3, 3), limits = wlim, name = "Final\ninclusion\nprobability",
+                    breaks = c(0.1, 0.5, 1)) +
     guides(linewidth = guide_legend(override.aes = list(colour = "grey35")))
+  if (use_perm)
+    p2 <- p2 + scale_linetype_manual(values = c(sig = "solid", ns = "22"), drop = FALSE,
+                                     name = "Permutation test",
+                                     labels = c(sig = sprintf("p < %.2f (familywise)", perm_alpha),
+                                                ns = "not significant")) +
+      guides(linetype = guide_legend(override.aes = list(colour = "grey35", linewidth = 0.9)))
   save_fig(p2, "figure2_vocabulary_network")
 } else {
   message("Figure 2 skipped: ", coefs_csv, " not found (run step2a + step2b first)")

@@ -21,8 +21,13 @@
 #             permutation run, which corrects for looking at all blocks.
 #   groups  — outer inclusion per behaviour group.
 #   global  — weight of the intercept-only model (small = signal; p = share
-#             of permutations with weight at most as large) and the ELPD
-#             difference of the best model over the intercept-only model.
+#             of permutations with weight at most as large), the ELPD
+#             difference of the best model over the intercept-only model, and
+#             the LARGEST final / inner / group inclusion probability in the
+#             run. The 95th percentile of the null for max_final_inclusion is
+#             the permutation-calibrated inclusion threshold: in only 5% of
+#             runs with no real association does any block reach it
+#             (make_figures.R threshold=perm uses it).
 #
 # Usage:
 #   Rscript permutation_null.R <run_dir> [prefix]
@@ -116,26 +121,44 @@ groups_out <- groups_out[order(-groups_out$outer), ]
 
 null_int  <- vapply(perms, function(p) p$global[["intercept_weight"]], numeric(1))
 null_best <- vapply(perms, function(p) p$global[["best_elpd_diff"]], numeric(1))
-global_out <- data.frame(
-  statistic = c("intercept_only_weight", "best_model_elpd_diff"),
-  observed  = c(obs$global[["intercept_weight"]], obs$global[["best_elpd_diff"]]),
-  null_q05  = c(quantile(null_int, 0.05), quantile(null_best, 0.05)),
-  null_median = c(median(null_int), median(null_best)),
-  null_q95  = c(quantile(null_int, 0.95), quantile(null_best, 0.95)),
-  p = c(p_le(obs$global[["intercept_weight"]], null_int), p_ge(obs$global[["best_elpd_diff"]], null_best)),
-  note = c("p = share of permutations with intercept-only weight <= observed (small weight = signal)",
-           "p = share of permutations with best-model ELPD gain >= observed"),
+null_max_inner <- vapply(perms, function(p) max(c(0, p$blocks$inner)), numeric(1))
+g_row <- function(stat, obs_val, nv, lower_is_signal, note) data.frame(
+  statistic = stat, observed = obs_val,
+  null_q05 = unname(quantile(nv, 0.05)), null_median = median(nv), null_q95 = unname(quantile(nv, 0.95)),
+  p = if (lower_is_signal) p_le(obs_val, nv) else p_ge(obs_val, nv), note = note,
   stringsAsFactors = FALSE, row.names = NULL)
+global_out <- rbind(
+  g_row("intercept_only_weight", obs$global[["intercept_weight"]], null_int, TRUE,
+        "p = share of permutations with intercept-only weight <= observed (small weight = signal)"),
+  g_row("best_model_elpd_diff", obs$global[["best_elpd_diff"]], null_best, FALSE,
+        "p = share of permutations with best-model ELPD gain >= observed"),
+  g_row("max_final_inclusion", max(c(0, ob$final)), null_max_final, FALSE,
+        "largest final inclusion of any block; null_q95 = permutation-calibrated threshold"),
+  g_row("max_inner_inclusion", max(c(0, ob$inner)), null_max_inner, FALSE,
+        "largest within-group inclusion of any block"),
+  g_row("max_group_inclusion", max(c(0, obs$groups$outer)), null_max_outer, FALSE,
+        "largest group (outer) inclusion"))
 
 write.csv(blocks_out, file.path(perm_dir, "permutation_null_blocks.csv"), row.names = FALSE)
 write.csv(groups_out, file.path(perm_dir, "permutation_null_groups.csv"), row.names = FALSE)
 write.csv(global_out, file.path(perm_dir, "permutation_null_global.csv"), row.names = FALSE)
+
+thr <- global_out$null_q95[global_out$statistic == "max_final_inclusion"]
+top <- blocks_out[1, ]
+calib_txt <- sprintf(paste0(
+  "Permutation-calibrated threshold for final inclusion (95th percentile of the largest final\n",
+  "inclusion in each permutation run): %.3f. Blocks above it: %d.\n",
+  "Top observed block: %s (final inclusion %.3f); the largest block in a permutation run\n",
+  "reached at least this in %.0f%% of runs (familywise p = %.3f).\n"),
+  thr, sum(blocks_out$final > thr), top$block, top$final,
+  100 * mean(null_max_final >= top$final - 1e-12), top$p_final_max)
 
 fmt <- function(df) paste(capture.output(print(format(df, digits = 3), row.names = FALSE)), collapse = "\n")
 report <- paste0(
   "Permutation null for Step 2 (", n, " permutations; weights = ", obs$weight_mode,
   ", blocks = ", obs$block_mode, ")\n",
   "Smallest attainable p-value with ", n, " permutations: ", signif(1 / (n + 1), 3), "\n\n",
+  calib_txt, "\n",
   "GLOBAL\n", fmt(global_out[, 1:6]), "\n\n",
   "BEHAVIOUR GROUPS (outer inclusion)\n", fmt(groups_out), "\n\n",
   "BLOCKS (top 20 by final inclusion)\n", fmt(head(blocks_out, 20)), "\n\n",

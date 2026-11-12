@@ -232,6 +232,17 @@ model-averaged effect on log vocabulary with a 90% interval and P(> 0), and
 permutation p-values when available). Table S2's effect columns need Step 2a
 output from the current `select_terms_for_individual_behaviours.R`.
 
+**Figure 2 threshold**: the original one-third cut-off is gone. By default
+Figure 2 shows every block with a final inclusion probability of at least
+0.01, with line width proportional to it (a display floor, not a test). The
+inferential statement comes from the permutation null: `permutation_null.R`
+reports the permutation-calibrated threshold (95th percentile of the largest
+final inclusion probability of any block in each permutation run) and each
+block's familywise p (`p_final_max`). When those results exist, Figure 2
+draws blocks with familywise p < .05 solid and the rest dashed;
+`threshold=perm` (`FIG2_THRESHOLD=perm`) draws only blocks above the
+calibrated threshold, and `threshold=0.333` reproduces the old figure.
+
 **Permutation null for Step 2** (`make_bridge.R`, `permutation_null.R`):
 Step 2a and 2b are repeated with the vocabulary scores shuffled across
 children (`permute_seed=`), using a small summary of the Step 1 posterior

@@ -77,11 +77,18 @@
 #   child-clustered z:   FIGURE=1 FIG1_Z=z_child bash run_dsem_pipeline.slurm figures
 #   (FIG1_SHOW=strong draws only the strong edges).
 #
+#   Figure 2 no longer uses the paper's arbitrary 1/3 cut-off: by default it
+#   draws every block with final inclusion >= 0.01, line width = inclusion.
+#   FIG2_THRESHOLD=perm draws only blocks above the permutation-calibrated
+#   threshold (95th percentile of the largest final inclusion in the
+#   permutation runs); FIG2_THRESHOLD=0.333 gives the old figure.
+#
 #   Permutation null for Step 2 (after step2a + step2b have finished):
 #     STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm permutations
 #   Use the SAME STEP2_WEIGHTS / STEP2B_BLOCKS / STEP2B_MIN_INNER as the observed
 #   run. Submits bridge -> perm2a (PERM_N x 9 tasks) -> perm2b (PERM_N tasks)
-#   -> perm_summary -> tables. Settings: PERM_N (default 100), PERM_CHAINS (2)
+#   -> perm_summary -> tables + Figure 2 (lines solid where the familywise
+#   permutation p < .05, dashed otherwise). Settings: PERM_N (default 100), PERM_CHAINS (2)
 #   and PERM_ITER (500) per model, PERM_MAX_RUNNING (100 tasks at once),
 #   PERM_SEED_BASE. Each permutation costs roughly 9 x 2-3 h + 3-4 h of CPU;
 #   finished permutations are skipped on resubmission, so it can be run in
@@ -133,6 +140,9 @@ FIGURE="${FIGURE:-both}"             # figures stage: 1, 2 or both
 FIG1_RULE="${FIG1_RULE:-mean}"       # Figure 1 positive rule: mean or pop
 FIG1_PROB="${FIG1_PROB:-0.95}"       # probability cut-off when FIG1_RULE=pop
 FIG1_Z="${FIG1_Z:-z_score}"          # Figure 1 z: z_score | z_child | z_block
+FIG2_THRESHOLD="${FIG2_THRESHOLD:-0.01}" # Figure 2 blocks drawn: 0.01 = all with non-negligible
+                                      #   weight; perm = permutation-calibrated threshold;
+                                      #   or a number (the original paper used 0.333)
 FIG1_SHOW="${FIG1_SHOW:-all}"        # Figure 1: all (weak edges dashed) | strong
 STEP1_SESSION="${STEP1_SESSION:-0}"  # Step 1 options (fitVAR.R); defaults = reported run
 STEP1_ONSET="${STEP1_ONSET:-0}"
@@ -192,7 +202,7 @@ banner() {
 submit_stage() {
   local stage="$1"; shift
   sbatch --parsable -p "$PARTITION" -n 1 \
-    --export=ALL,STAGE="$stage",REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR",STEP2_SEED="$STEP2_SEED",FIGURE="$FIGURE",FIG1_RULE="$FIG1_RULE",FIG1_PROB="$FIG1_PROB",FIG1_Z="$FIG1_Z",FIG1_SHOW="$FIG1_SHOW",STEP2B_BLOCKS="$STEP2B_BLOCKS",STEP2B_MIN_INNER="$STEP2B_MIN_INNER",STEP2_WEIGHTS="$STEP2_WEIGHTS",STEP1_SESSION="$STEP1_SESSION",STEP1_ONSET="$STEP1_ONSET",STEP1_LAG_STEP="$STEP1_LAG_STEP",GRANGER_BLOCK_ROWS="$GRANGER_BLOCK_ROWS",PERM_N="$PERM_N",PERM_CHAINS="$PERM_CHAINS",PERM_ITER="$PERM_ITER",PERM_SEED_BASE="$PERM_SEED_BASE" \
+    --export=ALL,STAGE="$stage",REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR",STEP2_SEED="$STEP2_SEED",FIGURE="$FIGURE",FIG1_RULE="$FIG1_RULE",FIG1_PROB="$FIG1_PROB",FIG1_Z="$FIG1_Z",FIG2_THRESHOLD="$FIG2_THRESHOLD",FIG1_SHOW="$FIG1_SHOW",STEP2B_BLOCKS="$STEP2B_BLOCKS",STEP2B_MIN_INNER="$STEP2B_MIN_INNER",STEP2_WEIGHTS="$STEP2_WEIGHTS",STEP1_SESSION="$STEP1_SESSION",STEP1_ONSET="$STEP1_ONSET",STEP1_LAG_STEP="$STEP1_LAG_STEP",GRANGER_BLOCK_ROWS="$GRANGER_BLOCK_ROWS",PERM_N="$PERM_N",PERM_CHAINS="$PERM_CHAINS",PERM_ITER="$PERM_ITER",PERM_SEED_BASE="$PERM_SEED_BASE" \
     "$@" "$SELF"
 }
 
@@ -337,6 +347,9 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
       if [[ "$WHAT" == permutations ]]; then
         JT=$(submit_stage tables -J dsem_tables -t 0-1 --mem=8G --dependency=afterany:$JPS -o "$LOG_DIR/tables.out")
         echo "Tables   (with permutation p-values):       job $JT"
+        JF2=$(FIGURE=2 submit_stage figures -J dsem_figure2 -t 0-1 --mem=8G --dependency=afterok:$JPS \
+                -o "$LOG_DIR/figure2_perm.out")
+        echo "Figure 2 (with permutation significance):   job $JF2"
       fi
     fi
   fi
@@ -425,7 +438,7 @@ figures)
   banner "Figures 1 and 2"
   load_r
   Rscript "$REPO_DIR/make_figures.R" "$RUN_DIR" "$RUN_DIR/FIGURES" figure="$FIGURE" \
-    rule="$FIG1_RULE" prob="$FIG1_PROB" z="$FIG1_Z" show="$FIG1_SHOW"
+    rule="$FIG1_RULE" prob="$FIG1_PROB" z="$FIG1_Z" show="$FIG1_SHOW" threshold="$FIG2_THRESHOLD"
   ;;
 
 tables)
