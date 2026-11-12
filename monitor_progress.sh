@@ -76,11 +76,17 @@ fits_done() {   # $1 = raw job id, $2 = array index, $3 = chains per model
   local n; n=$(find "$d" -name '*.csv' 2>/dev/null | wc -l)
   echo $(( n / $3 ))
 }
+# Fitting rate is measured from the first model's output, not from the job
+# start: loading the Step 1 draws (observed Step 2a) can take half an hour.
 show_2a_task() {   # $1 label, $2 raw id, $3 idx, $4 elapsed, $5 chains
   local f; f=$(fits_done "$2" "$3" "$5")
   local s; s=$(secs "$4")
   local eta="?"
-  if [[ $f -gt 5 ]]; then eta=$(hm $(( s * (N_COMBOS_2A - f) / f ))); fi
+  local first; first=$(find "$TMP/${2}_${3}" -name '*.csv' -printf '%T@\n' 2>/dev/null | sort -n | head -1)
+  if [[ $f -gt 20 && -n "$first" ]]; then
+    local fit_s=$(( $(date +%s) - ${first%.*} ))
+    [[ $fit_s -gt 0 ]] && eta=$(hm $(( fit_s * (N_COMBOS_2A - f) / f )))
+  fi
   printf "  %-26s %4d / %d models (%3d%%)  elapsed %-8s ETA %s\n" "$1" "$f" "$N_COMBOS_2A" \
     $(( 100 * f / N_COMBOS_2A )) "$(hm "$s")" "$eta"
 }
