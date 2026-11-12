@@ -161,14 +161,17 @@ dsem_step1_*.rds
     │   ├── obs_mask[N, T_max]   — 1 = observed time point
     │   ├── is_binary[V]         — 1 = binary outcome
     │   ├── prior_sd_A, prior_sd_intercept, prior_sd_sigma_mu
-    │   └── grainsize            — parallel sum grain size
+    │   ├── grainsize            — parallel sum grain size
+    │   ├── use_session, session_x[N, T_max]   — session option (centred indicator)
+    │   └── use_onset, y_include[N, T_max, V]  — onset option (1 = in likelihood)
     ├── $participants    — character vector, length N
     ├── $behaviours      — character vector, length V
     ├── $lag_col_names   — character vector, length K
     ├── $X_lag_center, $X_lag_scale  — centring constants (lags are 0/1, centred, not scaled; scale = 1)
     ├── $V               — number of behaviours
     ├── $K               — V × p (total lag columns)
-    └── $Q               — V×K + V (parameters per person)
+    ├── $Q               — V×K + V (parameters per person)
+    └── $options         — Step 1 options (session, onset, lag_step, ...)
 ```
 
 The `z_person[i,q]` parameters encode each participant's individual VAR parameters in a non-centred form. `Q = V×K + V` decomposes as:
@@ -195,6 +198,69 @@ Rscript final_term_weighting.R MODELS-DSEM/ MODELS-DSEM/ dsem_selection_from_sin
 ```
 
 `CDI_data.csv` must be in the directory from which Steps 2a and 2b are run.
+
+---
+
+## Robustness analyses added in response to review (branch `reviewer_response`)
+
+The code that produced the results reported in the resubmission is on branch
+`resubmission_results`. Everything below is optional: with no options set the
+pipeline reproduces that run exactly.
+
+**Step 1 variants** (`fitVAR.R`, set as environment variables; use a new `RUN_DIR` for each):
+
+| Option | What it does | Addresses |
+|---|---|---|
+| `STEP1_SESSION=1` | Lags built within each recording session (no lag crosses from the 11-month into the 12-month recording) and a session effect on every behaviour's intercept (population mean + child deviation) | concatenation of the two sessions |
+| `STEP1_ONSET=1` | Each behaviour is predicted only where it was absent at the previous 200 ms sample, i.e. its onset; all lags remain predictors | persistence vs transitions |
+| `STEP1_LAG_STEP=2` | Lags 400 ms apart (five lags = 2 s window instead of 1 s) | temporal resolution / window |
+
+**Granger standard errors** (`granger_analysis.R`): in addition to the
+observation-level SE (`se_diff`, `z_score`), every pair now has a
+child-clustered SE (`se_diff_child`, `z_child`: pointwise ELPD differences
+summed within child, SE across the 58 children) and a block SE
+(`se_diff_block`, `z_block`: sums over blocks of `block_rows` consecutive
+modelled time points, default 20 ≈ 12 s). These allow for serial dependence
+within each child's series. Re-scoring an existing Step 1 run needs no refit.
+
+**Figures and tables**: `make_figures.R z=z_child` uses the chosen z for
+strong support; strong edges (z > 2) are solid and weak edges dashed
+(`show=strong` draws strong edges only). `make_tables.R` writes Table S1 (all
+72 pairs with every SE, z and the population-level effect) and Table S2 (every
+Step 2 block with its inner, group and final inclusion probabilities, its
+model-averaged effect on log vocabulary with a 90% interval and P(> 0), and
+permutation p-values when available). Table S2's effect columns need Step 2a
+output from the current `select_terms_for_individual_behaviours.R`.
+
+**Permutation null for Step 2** (`make_bridge.R`, `permutation_null.R`):
+Step 2a and 2b are repeated with the vocabulary scores shuffled across
+children (`permute_seed=`), using a small summary of the Step 1 posterior
+(`bridge=`) instead of the full draws. `permutation_null.R` compares the
+observed inclusion probabilities, the intercept-only model's weight and the
+best model's ELPD gain with their permutation distributions, including
+p-values corrected for looking at every block (`p_final_max`).
+
+```bash
+# Re-score Granger with clustered/block SEs (no Step 1 refit), then figures + tables
+bash run_dsem_pipeline.slurm granger          # then granger_combine, granger_direction
+FIGURE=1 FIG1_Z=z_child bash run_dsem_pipeline.slurm figures
+bash run_dsem_pipeline.slurm tables
+
+# Step 2 again (needed for the model-averaged effects in Table S2)
+STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm step2a
+STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm step2b
+
+# Permutation null (same weights/blocks as the observed run)
+STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all PERM_N=100 bash run_dsem_pipeline.slurm permutations
+
+# Step 1 variants, each in its own run folder
+RUN_DIR=/scratch/q55362cb/dsem_session STEP1_SESSION=1 \
+  STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm
+RUN_DIR=/scratch/q55362cb/dsem_onset STEP1_SESSION=1 STEP1_ONSET=1 \
+  STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm
+RUN_DIR=/scratch/q55362cb/dsem_lag2 STEP1_SESSION=1 STEP1_LAG_STEP=2 \
+  STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm
+```
 
 ---
 

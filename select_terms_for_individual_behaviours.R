@@ -10,6 +10,27 @@
 #
 # Usage:
 #   Rscript select_terms_for_individual_behaviours.R <behaviour> [input_folder] [seed=<int>]
+#           [out_dir=<folder>] [bridge=<file>] [permute_seed=<int>]
+#           [chains=4] [iter=500] [max_combos=<int>]
+#
+#   out_dir=       where to write the result (default: input_folder)
+#   bridge=        read the children's Step 1 posterior means/SDs from a file
+#                  made by make_bridge.R instead of the Step 1 draws (much less
+#                  memory; used by the permutation runs)
+#   permute_seed=  shuffle the vocabulary scores across children with this
+#                  seed before fitting (permutation null; see
+#                  permutation_null.R). The same seed gives the same shuffle in
+#                  final_term_weighting.R.
+#   chains=, iter= MCMC chains and warm-up (= sampling) iterations per model
+#   max_combos=    fit only the first n block combinations (quick tests only)
+#
+# For every block the result also holds its effect on vocabulary
+# ($block_effects): the sum of the regression coefficients over the block's
+# terms (all five lags of a lag block), averaged over the models that contain
+# the block with their pseudo-BMA+ (or stacking) weights. It gives the
+# posterior mean, 90% interval and P(effect > 0) conditional on the block
+# being in the model, and the 90% interval of the fully model-averaged effect
+# (which is 0 in models without the block).
 #
 # Example:
 #   Rscript select_terms_for_individual_behaviours.R gaze
@@ -42,6 +63,19 @@ if (is.na(base_seed)) base_seed <- sample.int(.Machine$integer.max - 1e6, 1)
 message("Seed: ", base_seed, "  (re-run with seed=", base_seed, " to reproduce)")
 set.seed(base_seed)
 
+keyed_arg <- function(args, key, default = NA) {
+  hit <- grep(paste0("^(--)?", key, "="), args, value = TRUE)
+  if (length(hit) == 0) return(default)
+  sub(paste0("^(--)?", key, "="), "", hit[length(hit)])
+}
+out_dir_arg  <- keyed_arg(args, "out_dir")
+bridge_file  <- keyed_arg(args, "bridge")
+permute_seed <- suppressWarnings(as.integer(keyed_arg(args, "permute_seed")))
+n_chains     <- as.integer(keyed_arg(args, "chains", 4))
+n_iter       <- as.integer(keyed_arg(args, "iter", 500))
+max_combos   <- suppressWarnings(as.integer(keyed_arg(args, "max_combos")))
+if (!is.na(permute_seed)) message("PERMUTATION RUN: vocabulary shuffled with permute_seed=", permute_seed)
+
 pos_args <- args[!grepl("=", args)]
 if (length(pos_args) < 1) {
   stop("Usage: Rscript select_terms_for_individual_behaviours.R <behaviour> [input_folder] [seed=<int>]")
@@ -63,15 +97,25 @@ combine_step1_results <- function(rds_list) {
   list(draws = draws_combined, prep = prep)
 }
 
-if (!is_dir(input_folder)) stop("Provided path is not a directory: ", input_folder)
-rds_files <- list.files(input_folder, pattern = "^dsem_step1_.*\\.rds$", full.names = TRUE)
-if (length(rds_files) == 0) {
-  rds_files <- list.files(input_folder, pattern = "^dsem_result_.*\\.rds$", full.names = TRUE)
+output_folder <- if (is.na(out_dir_arg)) input_folder else out_dir_arg
+dir.create(output_folder, showWarnings = FALSE, recursive = TRUE)
+
+if (!is.na(bridge_file)) {
+  message("Reading Step 1 bridge file: ", bridge_file)
+  bridge_obj   <- readRDS(bridge_file)
+  step1_result <- list(prep = bridge_obj$prep)
+} else {
+  if (!is_dir(input_folder)) stop("Provided path is not a directory: ", input_folder)
+  rds_files <- list.files(input_folder, pattern = "^dsem_step1_.*\\.rds$", full.names = TRUE)
+  if (length(rds_files) == 0) {
+    rds_files <- list.files(input_folder, pattern = "^dsem_result_.*\\.rds$", full.names = TRUE)
+  }
+  if (length(rds_files) == 0) stop("No step-1 RDS files (dsem_step1_*.rds) found in folder: ", input_folder)
+  message("Loading and combining RDS files from folder: ", input_folder)
+  step1_results <- lapply(rds_files, readRDS)
+  step1_result  <- combine_step1_results(step1_results)
+  rm(step1_results)
 }
-if (length(rds_files) == 0) stop("No step-1 RDS files (dsem_step1_*.rds) found in folder: ", input_folder)
-message("Loading and combining RDS files from folder: ", input_folder)
-step1_results <- lapply(rds_files, readRDS)
-step1_result  <- combine_step1_results(step1_results)
 
 library(cmdstanr)
 library(posterior)
@@ -202,7 +246,7 @@ bridge_step1 <- function(step1_result) {
   list(z_hat = z_hat, z_sd = z_sd)
 }
 
-bridge <- bridge_step1(step1_result)
+bridge <- if (!is.na(bridge_file)) bridge_obj[c("z_hat", "z_sd")] else bridge_step1(step1_result)
 
 cdi_imp <- read.csv(
   "CDI_data.csv",
@@ -229,6 +273,16 @@ has_outcome <- !is.na(merged$us18_imp)
 out_idx     <- which(has_outcome)        # indexes into merged / step1 rows
 N_out       <- length(out_idx)
 y_out       <- log1p(as.numeric(merged$us18_imp[has_outcome]))
+
+# Permutation null: shuffle the outcome across children (same shuffle for a
+# given permute_seed in every script), leaving the RNG stream otherwise as it
+# was.
+if (!is.na(permute_seed)) {
+  old_seed <- .Random.seed
+  set.seed(permute_seed)
+  y_out <- y_out[sample.int(length(y_out))]
+  .Random.seed <- old_seed
+}
 
 Z_mean <- bridge$z_hat[out_idx, , drop = FALSE]
 Z_sd   <- bridge$z_sd[out_idx,  , drop = FALSE]
@@ -259,9 +313,9 @@ mod_normal    <- cmdstan_model(write_stan_file(stan_normal))
 message("  Done.")
 
 fit_and_loo <- function(mod, data_list,
-                        chains        = 4,
-                        iter_warmup   = 500,
-                        iter_sampling = 500,
+                        chains        = n_chains,
+                        iter_warmup   = n_iter,
+                        iter_sampling = n_iter,
                         refresh       = 0,
                         seed          = NULL) {
   fit <- mod$sample(
@@ -303,6 +357,24 @@ n_blocks <- length(block_defs)
 all_combos <- unlist(lapply(1:n_blocks, function(k) {
   combn(seq_len(n_blocks), k, simplify = FALSE)
 }), recursive = FALSE)
+if (!is.na(max_combos)) {
+  message("TEST MODE: only the first ", max_combos, " of ", length(all_combos), " combinations")
+  all_combos <- head(all_combos, max_combos)
+}
+
+# Draws of each block's effect (sum of its coefficients) kept per model.
+n_keep_draws <- 200L
+block_effect_draws <- function(fit, combo, trial_local) {
+  beta <- fit$draws("beta", format = "matrix")
+  keep <- unique(round(seq(1, nrow(beta), length.out = min(n_keep_draws, nrow(beta)))))
+  out <- vapply(combo, function(blk) {
+    cols <- match(sort(unique(block_defs[[blk]])), trial_local)
+    rowSums(beta[keep, cols, drop = FALSE])
+  }, numeric(length(keep)))
+  out <- matrix(out, nrow = length(keep))
+  colnames(out) <- as.character(combo)
+  out
+}
 
 # ---------------------------------------------------------------------------
 # Shared complete-case mask across all combinations.
@@ -371,7 +443,8 @@ for (ci in seq_along(all_combos)) {
     elpd       = elpd,
     elpd_se    = elpd_se,
     elpd_diff  = elpd_diff,
-    trial_cols = trial_cols
+    trial_cols = trial_cols,
+    eff_draws  = block_effect_draws(res$fit, combo, trial_local)
   )
 }
 
@@ -438,6 +511,38 @@ if (length(combo_results) == 0) {
     else                "negative"
   }, character(1))
 
+  # Block effects on vocabulary, averaged over models with each weighting.
+  summarise_block_effects <- function(w_models, n_mix = 4000L) {
+    set.seed(base_seed)
+    do.call(rbind, lapply(seq_len(n_blocks), function(blk) {
+      has <- which(vapply(combo_results, function(cr) blk %in% cr$combo, logical(1)))
+      w   <- w_models[has]
+      incl <- sum(w)
+      na_row <- data.frame(block_idx = blk, block_label = block_names[blk], inclusion = incl,
+                           cond_mean = NA_real_, cond_q05 = NA_real_, cond_q95 = NA_real_,
+                           cond_p_positive = NA_real_, avg_mean = NA_real_,
+                           avg_q05 = NA_real_, avg_q95 = NA_real_)
+      if (length(has) == 0 || !(incl > 0)) return(na_row)
+      pick <- has[sample.int(length(has), n_mix, replace = TRUE, prob = w / incl)]
+      d <- vapply(pick, function(m) {
+        x <- combo_results[[m]]$eff_draws[, as.character(blk)]
+        x[sample.int(length(x), 1L)]
+      }, numeric(1))
+      # Fully model-averaged: effect is 0 with probability 1 - inclusion.
+      a <- ifelse(stats::runif(n_mix) < incl, d, 0)
+      data.frame(block_idx = blk, block_label = block_names[blk], inclusion = incl,
+                 cond_mean = mean(d), cond_q05 = unname(stats::quantile(d, 0.05)),
+                 cond_q95 = unname(stats::quantile(d, 0.95)), cond_p_positive = mean(d > 0),
+                 avg_mean = mean(a), avg_q05 = unname(stats::quantile(a, 0.05)),
+                 avg_q95 = unname(stats::quantile(a, 0.95)))
+    }))
+  }
+  be_pbma  <- summarise_block_effects(pseudobma_w[-1])
+  be_stack <- summarise_block_effects(stacking_w[-1])
+  block_effects <- cbind(be_pbma[, c("block_idx", "block_label")],
+                         setNames(be_pbma[, -(1:2)],  paste0("pbma_",  names(be_pbma)[-(1:2)])),
+                         setNames(be_stack[, -(1:2)], paste0("stack_", names(be_stack)[-(1:2)])))
+
   # Summary of all combinations for diagnostics.
   combo_summary <- data.frame(
     combo_label      = combo_labels,
@@ -467,14 +572,18 @@ if (length(combo_results) == 0) {
     combo_summary     = combo_summary,
     stacking_weights  = stacking_w,
     pseudobma_weights = pseudobma_w,
+    block_effects     = block_effects,
     baseline_elpd     = baseline_shared_elpd,
     n_cc              = N_shared,
-    seed              = base_seed
+    seed              = base_seed,
+    permute_seed      = permute_seed,
+    chains            = n_chains,
+    iter              = n_iter
   )
 }
 
 result_file <- file.path(
-  input_folder,
+  output_folder,
   paste0("dsem_selection_", target_behaviour, "_single_behaviour.rds")
 )
 saveRDS(group_selection[[target_behaviour]], file = result_file)

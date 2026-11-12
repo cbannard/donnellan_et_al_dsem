@@ -21,10 +21,53 @@
 # NOTE: $draws is extracted immediately after sampling so that the RDS is
 # self-contained even if the CmdStan CSV files are later cleaned up.
 # dsem_step2.R reads only $draws and $prep — it does not need $fit.
+#
+# OPTIONS (environment variables; the defaults reproduce the reported run)
+#   STEP1_SESSION=1    Treat the 11- and 12-month recordings as separate
+#                      series: lags are built within each session (the first
+#                      samples of a session never take lags from the end of
+#                      the other session), and each behaviour gets a session
+#                      effect on its intercept (population mean + child-level
+#                      deviation, both on the log-odds scale). Default 0: the
+#                      two sessions are concatenated into one series per child.
+#   STEP1_ONSET=1      Onset (transition) model: each behaviour is predicted
+#                      only at samples where it was absent in the previous
+#                      200 ms sample, so the model predicts the START of a
+#                      behaviour rather than its continuation. All behaviours'
+#                      lags are still predictors. (The lag-1 self-lag is then
+#                      uninformed by the data and stays at its prior.)
+#   STEP1_LAG_STEP=s   Spacing of the lags in 200 ms samples (default 1). With
+#                      s = 2 the five lags are t-2, t-4, ..., t-10, i.e. a 2 s
+#                      window instead of 1 s.
+#   STEP1_T_SUBSAMPLE, STEP1_ITER_WARMUP, STEP1_ITER_SAMPLING, STEP1_N_CHILDREN
+#                      run-size settings (defaults 3165, 1000, 1000, all);
+#                      only change these for quick tests.
+# The options used are saved in $prep$options and are read by the
+# downstream scripts (granger_analysis.R needs them).
 # =============================================================================
 
 args  <- commandArgs(trailingOnly = TRUE)
 jobid <- if (length(args) >= 1) args[1] else "unknownjob"
+
+env_int <- function(name, default) {
+  v <- Sys.getenv(name, unset = "")
+  if (!nzchar(v)) return(as.integer(default))
+  out <- suppressWarnings(as.integer(v))
+  if (is.na(out)) stop(name, " must be an integer (got '", v, "')")
+  out
+}
+opt_session   <- env_int("STEP1_SESSION", 0L) == 1L
+opt_onset     <- env_int("STEP1_ONSET", 0L) == 1L
+opt_lag_step  <- env_int("STEP1_LAG_STEP", 1L)
+opt_T_sub     <- env_int("STEP1_T_SUBSAMPLE", 3165L)
+opt_warmup    <- env_int("STEP1_ITER_WARMUP", 1000L)
+opt_sampling  <- env_int("STEP1_ITER_SAMPLING", 1000L)
+opt_n_child   <- env_int("STEP1_N_CHILDREN", 0L)     # 0 = all children
+if (opt_lag_step < 1L) stop("STEP1_LAG_STEP must be >= 1")
+message("Step 1 options: session=", opt_session, "  onset=", opt_onset,
+        "  lag_step=", opt_lag_step, "  T_subsample=", opt_T_sub,
+        "  warmup=", opt_warmup, "  sampling=", opt_sampling,
+        if (opt_n_child > 0) paste0("  n_children=", opt_n_child) else "")
 
 
 # =============================================================================
@@ -45,6 +88,14 @@ step1_stan <- "
 // child's observed time points at once) rather than one small
 // matrix-vector product per time point. The model is unchanged; this only
 // cuts the automatic-differentiation overhead, which dominated run time.
+//
+// Optional (data flags, both 0 in the reported run):
+//   use_session = 1: each behaviour's intercept differs between the two
+//     recording sessions by delta_person[i][v] (population mean delta_pop,
+//     child-level SD sigma_delta), multiplying a centred session indicator.
+//   use_onset = 1: y[i, t, v] only enters the likelihood where
+//     y_include[i, t, v] = 1 (behaviour v absent at the previous sample), so
+//     the model is for the onset of each behaviour.
 //
 // generated quantities block exposes z_person[i], the Q-vector
 //   z_i = [ vec(A[i]) | mu_person[i] ]
@@ -68,6 +119,11 @@ data {
   real<lower=0> prior_sd_sigma_mu;   // SD of half-normal prior on sigma_mu
 
   int<lower=1> grainsize;
+
+  int<lower=0, upper=1> use_session;
+  array[N, T_max]       real session_x;           // centred session indicator
+  int<lower=0, upper=1> use_onset;
+  array[N, T_max, V]    int<lower=0, upper=1> y_include;
 }
 
 transformed data {
@@ -90,6 +146,8 @@ transformed data {
   array[N] int row_end;
   matrix[n_total, K + 1] X1;
   matrix[n_total, V]     Y_obs;
+  vector[n_total]        S_obs;    // session indicator (used if use_session)
+  matrix[n_total, V]     W_obs;    // 1 = enters the likelihood (used if use_onset)
   {
     int r = 0;
     for (i in 1:N) {
@@ -100,6 +158,8 @@ transformed data {
         X1[r, 1] = 1;
         for (k in 1:K) X1[r, k + 1] = X_lag[i, t, k];
         for (v in 1:V) Y_obs[r, v] = Y[i, t, v];
+        S_obs[r] = session_x[i, t];
+        for (v in 1:V) W_obs[r, v] = y_include[i, t, v];
       }
       row_end[i] = r;
     }
@@ -115,15 +175,23 @@ parameters {
   // Non-centred person-level deviations
   array[N] matrix[V, K]  A_z;
   array[N] vector[V]     mu_z;
+
+  // Session effects (zero-length unless use_session = 1)
+  vector[use_session * V]           delta_pop;
+  vector<lower=0>[use_session * V]  sigma_delta;
+  array[N] vector[use_session * V]  delta_z;
 }
 
 transformed parameters {
   array[N] matrix[V, K]        A;
   array[N] vector[V]           mu_person;
+  array[N] vector[use_session * V] delta_person;
 
   for (i in 1:N) {
     A[i]             = A_pop + sigma_A .* A_z[i];
     mu_person[i]     = mu_pop + sigma_mu .* mu_z[i];
+    if (use_session == 1)
+      delta_person[i] = delta_pop + sigma_delta .* delta_z[i];
   }
 }
 
@@ -138,6 +206,11 @@ model {
     to_vector(A_z[i]) ~ std_normal();
     mu_z[i]           ~ std_normal();
   }
+  if (use_session == 1) {
+    delta_pop   ~ normal(0, 1);
+    sigma_delta ~ normal(0, 1);
+    for (i in 1:N) delta_z[i] ~ std_normal();
+  }
 
   // VAR likelihood, one matrix product per child. Bernoulli-logit
   // log-density written as y*eta - log(1 + exp(eta)), which equals
@@ -149,7 +222,13 @@ model {
     if (n_obs[i] == 0) continue;
     matrix[n_obs[i], V] eta =
       X1[row_start[i]:row_end[i]] * append_col(mu_person[i], A[i])';
-    target += sum(Y_obs[row_start[i]:row_end[i]] .* eta - log1p_exp(eta));
+    if (use_session == 1)
+      eta += S_obs[row_start[i]:row_end[i]] * delta_person[i]';
+    if (use_onset == 1)
+      target += sum(W_obs[row_start[i]:row_end[i]] .*
+                    (Y_obs[row_start[i]:row_end[i]] .* eta - log1p_exp(eta)));
+    else
+      target += sum(Y_obs[row_start[i]:row_end[i]] .* eta - log1p_exp(eta));
   }
 }
 
@@ -184,23 +263,41 @@ import_data <- function(file_name) {
 
 extract_child_id <- function(pid) sub("_(11m|12m)\\.csv$", "", pid)
 
-make_lagged_comp <- function(df_person, vars, p = 1, min_T = 30) {
+# Lagged design for one child. Lag j is the value lag_step * j samples
+# earlier; column <v>.prev is the value one sample earlier (used to define
+# onsets). With session_col given, lags are built within each session, so no
+# lag crosses from one recording into the next; the session is kept as a
+# column.
+shift_back <- function(x, d) {
+  n <- length(x)
+  if (d >= n) return(rep(NA_real_, n))
+  c(rep(NA_real_, d), x[1:(n - d)])
+}
+make_lagged_comp <- function(df_person, vars, p = 1, min_T = 30,
+                             lag_step = 1L, session_col = NULL) {
   df_person[vars] <- lapply(df_person[vars], as.numeric)
-  n_total <- nrow(df_person)
-  if (n_total <= p) return(NULL)
-  lagged_list <- list()
-  lag_names   <- character(0)
-  for (lag in seq_len(p)) {
-    for (v in vars) {
-      nm <- paste0(v, ".l", lag)
-      lagged_list[[nm]] <- c(rep(NA, lag),
-                             if (lag < n_total) df_person[[v]][1:(n_total - lag)]
-                             else rep(NA, n_total))
-      lag_names <- c(lag_names, nm)
-    }
+  if (!is.null(session_col)) {
+    pieces <- lapply(split(df_person, df_person[[session_col]]), function(d)
+      make_lagged_comp(d, vars, p = p, min_T = 1, lag_step = lag_step))
+    pieces <- pieces[!vapply(pieces, is.null, logical(1))]
+    if (length(pieces) == 0) return(NULL)
+    out <- do.call(rbind, pieces)
+    rownames(out) <- NULL
+    if (nrow(out) < min_T) return(NULL)
+    return(out)
   }
+  n_total <- nrow(df_person)
+  if (n_total <= p * lag_step) return(NULL)
+  lagged_list <- list()
+  for (lag in seq_len(p))
+    for (v in vars)
+      lagged_list[[paste0(v, ".l", lag)]] <- shift_back(df_person[[v]], lag * lag_step)
+  for (v in vars)
+    lagged_list[[paste0(v, ".prev")]] <- shift_back(df_person[[v]], 1L)
+  extra <- setdiff(names(df_person), vars)
   combined    <- cbind(df_person[vars],
-                       as.data.frame(lagged_list, stringsAsFactors = FALSE))
+                       as.data.frame(lagged_list, stringsAsFactors = FALSE),
+                       df_person[extra])
   complete_ix <- complete.cases(combined)
   if (sum(complete_ix) < min_T) return(NULL)
   combined[complete_ix, , drop = FALSE]
@@ -222,16 +319,26 @@ prepare_step1_data <- function(
   ts_method          = c("subsample", "aggregate", "none"),
   T_subsample        = 500,
   window_size        = 10,
-  grainsize          = 1
+  grainsize          = 1,
+  lag_step           = 1L,
+  use_session        = FALSE,
+  use_onset          = FALSE,
+  session_col        = "session"
 ) {
   ts_method    <- match.arg(ts_method)
+  if (ts_method == "aggregate" && (use_session || use_onset))
+    stop("ts_method='aggregate' cannot be combined with the session or onset options")
+  if (use_session && !session_col %in% names(combined_data))
+    stop("use_session needs a '", session_col, "' column in combined_data")
   participants <- unique(combined_data[[id_col]])
   V            <- length(behaviours)
   K            <- p * V
 
   all_comps <- lapply(participants, function(pid) {
     dfp <- combined_data[combined_data[[id_col]] == pid, , drop = FALSE]
-    make_lagged_comp(dfp, behaviours, p = p, min_T = p + 1)
+    keep <- c(behaviours, if (use_session) session_col)
+    make_lagged_comp(dfp[, keep, drop = FALSE], behaviours, p = p, min_T = p + 1,
+                     lag_step = lag_step, session_col = if (use_session) session_col)
   })
   names(all_comps) <- as.character(participants)
 
@@ -306,6 +413,18 @@ prepare_step1_data <- function(
   Y_arr    <- array(0,  dim = c(N, T_max, V))
   X_arr    <- array(0,  dim = c(N, T_max, K))
   obs_mask <- array(0L, dim = c(N, T_max))
+  S_arr    <- array(0,  dim = c(N, T_max))
+  W_arr    <- array(1L, dim = c(N, T_max, V))
+
+  # Session indicator: 0/1 (second session = 1), centred over all rows so
+  # mu stays the log-odds at the average session.
+  if (use_session) {
+    sess_levels <- sort(unique(unlist(lapply(all_comps, function(cmp) cmp[[session_col]]))))
+    if (length(sess_levels) != 2)
+      stop("use_session expects exactly 2 sessions, found: ", paste(sess_levels, collapse = ", "))
+    sess_all  <- unlist(lapply(all_comps, function(cmp) as.numeric(cmp[[session_col]] == sess_levels[2])))
+    sess_mean <- mean(sess_all)
+  }
 
   for (i in seq_along(participants)) {
     comp <- all_comps[[i]]
@@ -321,7 +440,17 @@ prepare_step1_data <- function(
       X_arr[i, seq_len(Ti), k] <- x_raw
     }
     obs_mask[i, seq_len(Ti)] <- 1L
+    if (use_session)
+      S_arr[i, seq_len(Ti)] <- as.numeric(comp[[session_col]] == sess_levels[2]) - sess_mean
+    if (use_onset)
+      for (v in seq_len(V))
+        W_arr[i, seq_len(Ti), v] <- as.integer(as.numeric(comp[[paste0(behaviours[v], ".prev")]]) == 0)
   }
+  if (use_onset)
+    message("Onset model: outcome samples entering the likelihood per behaviour: ",
+            paste(sprintf("%s %d", behaviours,
+                          vapply(seq_len(V), function(v) sum(W_arr[, , v] * obs_mask), numeric(1))),
+                  collapse = ", "))
 
   list(
     stan_data = list(
@@ -337,7 +466,11 @@ prepare_step1_data <- function(
       prior_sd_A         = prior_sd_A,
       prior_sd_intercept = prior_sd_intercept,
       prior_sd_sigma_mu  = prior_sd_sigma_mu,
-      grainsize          = as.integer(grainsize)
+      grainsize          = as.integer(grainsize),
+      use_session        = as.integer(use_session),
+      session_x          = S_arr,
+      use_onset          = as.integer(use_onset),
+      y_include          = W_arr
     ),
     participants  = as.character(participants),
     behaviours    = behaviours,
@@ -346,7 +479,11 @@ prepare_step1_data <- function(
     X_lag_scale   = col_sd,
     V             = V,
     K             = K,
-    Q             = V * K + V
+    Q             = V * K + V,
+    options       = list(session = use_session, onset = use_onset,
+                         lag_step = as.integer(lag_step), p = as.integer(p),
+                         ts_method = ts_method, T_subsample = T_subsample,
+                         session_levels = if (use_session) sess_levels else NULL)
   )
 }
 
@@ -378,6 +515,9 @@ fit_step1 <- function(
   use_pathfinder     = TRUE,
   pathfinder_paths   = 4,
   pathfinder_draws   = 200,
+  lag_step           = 1L,
+  use_session        = FALSE,
+  use_onset          = FALSE,
   ...
 ) {
   if (!requireNamespace("cmdstanr", quietly = TRUE)) stop("Install 'cmdstanr'")
@@ -401,21 +541,32 @@ fit_step1 <- function(
     ts_method          = ts_method,
     T_subsample        = T_subsample,
     window_size        = window_size,
-    grainsize          = grainsize
+    grainsize          = grainsize,
+    lag_step           = lag_step,
+    use_session        = use_session,
+    use_onset          = use_onset
   )
 
   V <- prep$stan_data$V
   K <- prep$stan_data$K
   N <- prep$stan_data$N
 
-  init_fn <- function() list(
-    A_pop        = matrix(0,   nrow = V, ncol = K),
-    sigma_A      = matrix(0.1, nrow = V, ncol = K),
-    A_z          = array(0,    dim  = c(N, V, K)),
-    mu_pop       = rep(0,   V),
-    sigma_mu     = rep(0.1, V),
-    mu_z         = matrix(0, nrow = N, ncol = V)
-  )
+  init_fn <- function() {
+    init <- list(
+      A_pop        = matrix(0,   nrow = V, ncol = K),
+      sigma_A      = matrix(0.1, nrow = V, ncol = K),
+      A_z          = array(0,    dim  = c(N, V, K)),
+      mu_pop       = rep(0,   V),
+      sigma_mu     = rep(0.1, V),
+      mu_z         = matrix(0, nrow = N, ncol = V)
+    )
+    if (use_session) {
+      init$delta_pop   <- rep(0,   V)
+      init$sigma_delta <- rep(0.1, V)
+      init$delta_z     <- matrix(0, nrow = N, ncol = V)
+    }
+    init
+  }
 
   # Run Pathfinder to get a fast variational approximation, then use its
   # draws to initialize HMC. This gives HMC a starting point much closer
@@ -497,11 +648,14 @@ behaviour_cols <- all_vars
 behaviours     <- all_vars
 combined_data  <- data.frame()
 
+if (opt_n_child > 0) parts <- head(parts, opt_n_child)   # quick tests only
+
 for (i in seq_along(parts)) {
   thispart_data <- df_all |>
     filter(child_id == parts[i]) |>
     arrange(month, TIME) |>
-    select(all_of(behaviour_cols))
+    mutate(session = month) |>
+    select(all_of(c(behaviour_cols, "session")))
   if (nrow(thispart_data) > 25) {
     combined_data <- rbind(
       combined_data,
@@ -533,10 +687,13 @@ step1_result <- fit_step1(
   prior_sd_intercept = 5,
   prior_sd_sigma_mu  = 2,
   ts_method          = "subsample",
-  T_subsample 	     = 3165,
+  T_subsample 	     = opt_T_sub,
   chains             = 1,        # one chain per job; run 16 jobs
-  iter_warmup        = 1000,
-  iter_sampling      = 1000,
+  iter_warmup        = opt_warmup,
+  iter_sampling      = opt_sampling,
+  lag_step           = opt_lag_step,
+  use_session        = opt_session,
+  use_onset          = opt_onset,
   cores              = 1,
   adapt_delta        = 0.95,
   refresh            = 1, 

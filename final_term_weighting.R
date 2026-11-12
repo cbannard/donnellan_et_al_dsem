@@ -57,6 +57,12 @@
 # Usage:
 #   Rscript final_term_weighting.R [selection_folder] [step1_folder] [output_prefix] [seed=<int>]
 #                                  [blocks=min|best|all] [min_inner=0.5] [weights=stacking|pseudobma]
+#                                  [bridge=<file>] [permute_seed=<int>] [chains=4] [iter=500]
+#                                  [max_combos=<int>]
+#
+#   bridge=, permute_seed=, chains=, iter=, max_combos= as in
+#   select_terms_for_individual_behaviours.R (permute_seed must match the
+#   Step 2a runs whose selection files are in selection_folder).
 #
 # Without seed=, a random seed is drawn; it is printed and saved as $seed in
 # <output_prefix>.rds so the run can be repeated exactly. A resumed run
@@ -94,6 +100,17 @@ if (!is.finite(min_inner) || min_inner < 0 || min_inner > 1) stop("min_inner mus
 wt_arg      <- sub("^(--)?weights=", "", grep("^(--)?weights=", args, value = TRUE))
 weight_mode <- if (length(wt_arg)) tolower(wt_arg[length(wt_arg)]) else "stacking"
 if (!weight_mode %in% c("stacking", "pseudobma")) stop("weights= must be stacking or pseudobma")
+keyed_arg <- function(args, key, default = NA) {
+  hit <- grep(paste0("^(--)?", key, "="), args, value = TRUE)
+  if (length(hit) == 0) return(default)
+  sub(paste0("^(--)?", key, "="), "", hit[length(hit)])
+}
+bridge_file  <- keyed_arg(args, "bridge")
+permute_seed <- suppressWarnings(as.integer(keyed_arg(args, "permute_seed")))
+n_chains     <- as.integer(keyed_arg(args, "chains", 4))
+n_iter       <- as.integer(keyed_arg(args, "iter", 500))
+max_combos   <- suppressWarnings(as.integer(keyed_arg(args, "max_combos")))
+if (!is.na(permute_seed)) message("PERMUTATION RUN: vocabulary shuffled with permute_seed=", permute_seed)
 message("Weights: ", weight_mode)
 message("Block mode: ", block_mode, if (block_mode == "min") paste0(" (min_inner = ", min_inner, ")") else "")
 
@@ -102,7 +119,7 @@ is_dir <- function(path) {
   if (is.na(info)) FALSE else info
 }
 if (!is_dir(selection_folder)) stop("Selection folder not found: ", selection_folder)
-if (!is_dir(step1_folder)) stop("Step-1 folder not found: ", step1_folder)
+if (is.na(bridge_file) && !is_dir(step1_folder)) stop("Step-1 folder not found: ", step1_folder)
 
 suppressPackageStartupMessages({
   library(cmdstanr)
@@ -273,6 +290,10 @@ message("Loading ", length(selection_files), " single-behaviour selection RDS fi
 single_records <- list()
 for (f in selection_files) {
   obj <- readRDS(f)
+  ps_file <- if (is.null(obj$permute_seed)) NA_integer_ else as.integer(obj$permute_seed)
+  if (!identical(ps_file, permute_seed))
+    stop("Selection file ", basename(f), " has permute_seed=", ps_file,
+         " but this run has permute_seed=", permute_seed)
   recs <- extract_single_behaviour_record(obj)
   if (is.null(recs)) next
   for (r in recs) single_records[[r$behaviour]] <- r
@@ -281,15 +302,21 @@ if (length(single_records) == 0) {
   stop("No valid {behaviour, selected_blocks} records found in selection RDS files")
 }
 
-step1_files <- list.files(step1_folder, pattern = "^dsem_step1_.*\\.rds$", full.names = TRUE)
-if (length(step1_files) == 0) {
-  step1_files <- list.files(step1_folder, pattern = "^dsem_result_.*\\.rds$", full.names = TRUE)
+if (!is.na(bridge_file)) {
+  message("Reading Step 1 bridge file: ", bridge_file)
+  bridge_obj   <- readRDS(bridge_file)
+  step1_result <- list(prep = bridge_obj$prep)
+} else {
+  step1_files <- list.files(step1_folder, pattern = "^dsem_step1_.*\\.rds$", full.names = TRUE)
+  if (length(step1_files) == 0) {
+    step1_files <- list.files(step1_folder, pattern = "^dsem_result_.*\\.rds$", full.names = TRUE)
+  }
+  if (length(step1_files) == 0) {
+    stop("No step-1 files found (expected dsem_step1_*.rds or dsem_result_*.rds) in: ", step1_folder)
+  }
+  message("Loading and combining ", length(step1_files), " step-1 files")
+  step1_result <- combine_step1_results(lapply(step1_files, readRDS))
 }
-if (length(step1_files) == 0) {
-  stop("No step-1 files found (expected dsem_step1_*.rds or dsem_result_*.rds) in: ", step1_folder)
-}
-message("Loading and combining ", length(step1_files), " step-1 files")
-step1_result <- combine_step1_results(lapply(step1_files, readRDS))
 
 step1_prep <- step1_result$prep
 behaviours <- step1_prep$behaviours
@@ -391,7 +418,7 @@ bridge_step1 <- function(step1_obj) {
   list(z_hat = z_hat, z_sd = z_sd)
 }
 
-bridge <- bridge_step1(step1_result)
+bridge <- if (!is.na(bridge_file)) bridge_obj[c("z_hat", "z_sd")] else bridge_step1(step1_result)
 
 cdi_imp <- read.csv(
   "CDI_data.csv",
@@ -409,6 +436,15 @@ has_outcome <- !is.na(merged$us18_imp)
 out_idx <- which(has_outcome)
 N_out <- length(out_idx)
 y_out <- log1p(as.numeric(merged$us18_imp[has_outcome]))
+
+# Permutation null: the same shuffle as select_terms_for_individual_behaviours.R
+# with the same permute_seed.
+if (!is.na(permute_seed)) {
+  old_seed <- if (exists(".Random.seed", envir = globalenv())) .Random.seed else NULL
+  set.seed(permute_seed)
+  y_out <- y_out[sample.int(length(y_out))]
+  if (!is.null(old_seed)) .Random.seed <- old_seed
+}
 
 Z_mean <- bridge$z_hat[out_idx, , drop = FALSE]
 Z_sd <- bridge$z_sd[out_idx, , drop = FALSE]
@@ -537,7 +573,7 @@ message("Compiling Stan models...")
 mod_intercept <- cmdstan_model(write_stan_file(stan_intercept))
 mod_normal <- cmdstan_model(write_stan_file(stan_normal))
 
-fit_and_loo <- function(mod, data_list, chains = 4, iter_warmup = 500, iter_sampling = 500, refresh = 0,
+fit_and_loo <- function(mod, data_list, chains = n_chains, iter_warmup = n_iter, iter_sampling = n_iter, refresh = 0,
                         seed = NULL) {
   fit <- mod$sample(
     data = data_list,
@@ -559,6 +595,10 @@ min_n_frac <- 0.80
 combos <- unlist(lapply(seq_along(candidate_behaviours), function(k) {
   combn(candidate_behaviours, k, simplify = FALSE)
 }), recursive = FALSE)
+if (!is.na(max_combos)) {
+  message("TEST MODE: only the first ", max_combos, " of ", length(combos), " combinations")
+  combos <- head(combos, max_combos)
+}
 
 # ---------------------------------------------------------------------------
 # Determine the shared complete-case mask across ALL combinations.
@@ -921,6 +961,9 @@ saveRDS(
     seed                    = base_seed,
     block_mode              = block_mode,
     weight_mode             = weight_mode,
+    permute_seed            = permute_seed,
+    chains                  = n_chains,
+    iter                    = n_iter,
     min_inner               = if (block_mode == "min") min_inner else NA_real_
   ),
   out_rds

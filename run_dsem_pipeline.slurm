@@ -12,6 +12,13 @@
 #   Step 2a  select_terms_for_individual_behaviours.R one task per behaviour
 #   Step 2b  final_term_weighting.R                   Figure 2 inclusion weights
 #   Figures  make_figures.R                           Figures 1 and 2 (network plots)
+#   Tables   make_tables.R                            Supplementary tables S1 (Granger) and S2 (Step 2)
+#
+#   Permutation null for Step 2 (run separately, see below):
+#   Bridge   make_bridge.R                            children's Step 1 posterior means/SDs, once
+#   Perm 2a  select_terms_for_individual_behaviours.R PERM_N x 9 tasks, vocabulary shuffled
+#   Perm 2b  final_term_weighting.R                   PERM_N tasks
+#   Summary  permutation_null.R                       p-values against the permutation null
 #
 # HOW TO RUN
 #   Put this file in the donnellan_et_al_dsem/ folder (next to fitVAR.R and
@@ -26,7 +33,7 @@
 #       step1 (array 1-16)  ──┬── convergence
 #                             ├── granger (array) ── granger_combine ──┬── granger_direction
 #                             │                                         │
-#                             └── step2a  (array 0-8) ── step2b ───────┴── figures
+#                             └── step2a  (array 0-8) ── step2b ───────┴── figures ── tables
 #
 #   To re-run a single stage (e.g. after fixing a failure):
 #
@@ -50,6 +57,37 @@
 #   Step 1 skips chains whose dsem_step1_<n>.rds already exists, so
 #   re-submitting step1 only reruns missing or failed chains.
 #
+# REVIEWER ROBUSTNESS ANALYSES
+#   Step 1 options (see fitVAR.R; defaults reproduce the reported run). Use a
+#   NEW RUN_DIR for each variant - the script refuses to mix options in one:
+#     STEP1_SESSION=1   lags built within each session + session intercepts
+#     STEP1_ONSET=1     predict behaviour onsets only (transition model)
+#     STEP1_LAG_STEP=2  lags 400 ms apart (2 s window)
+#   e.g. the recommended rerun:
+#     RUN_DIR=/scratch/q55362cb/dsem_session STEP1_SESSION=1 \
+#       STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm
+#     RUN_DIR=/scratch/q55362cb/dsem_onset STEP1_SESSION=1 STEP1_ONSET=1 \
+#       bash run_dsem_pipeline.slurm step1      (then granger etc. as needed)
+#
+#   Granger SEs: granger_analysis.R now also reports child-clustered and block
+#   SEs/z-scores (z_child, z_block). Re-score an existing Step 1 run without
+#   refitting:   bash run_dsem_pipeline.slurm granger      (then granger_combine,
+#   granger_direction, figures, tables). Block length: GRANGER_BLOCK_ROWS=20.
+#   Figure 1 with strong (z > 2) edges solid and weak edges dashed, using the
+#   child-clustered z:   FIGURE=1 FIG1_Z=z_child bash run_dsem_pipeline.slurm figures
+#   (FIG1_SHOW=strong draws only the strong edges).
+#
+#   Permutation null for Step 2 (after step2a + step2b have finished):
+#     STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm permutations
+#   Use the SAME STEP2_WEIGHTS / STEP2B_BLOCKS / STEP2B_MIN_INNER as the observed
+#   run. Submits bridge -> perm2a (PERM_N x 9 tasks) -> perm2b (PERM_N tasks)
+#   -> perm_summary -> tables. Settings: PERM_N (default 100), PERM_CHAINS (2)
+#   and PERM_ITER (500) per model, PERM_MAX_RUNNING (100 tasks at once),
+#   PERM_SEED_BASE. Each permutation costs roughly 9 x 2-3 h + 3-4 h of CPU;
+#   finished permutations are skipped on resubmission, so it can be run in
+#   batches (e.g. PERM_N=20 first, later PERM_N=100). Re-run only the summary
+#   with:  bash run_dsem_pipeline.slurm perm_summary
+#
 # OUTPUT: everything the pipeline writes (results, logs, temp files and the
 # unzipped data) goes under $RUN_DIR, default /scratch/q55362cb/dsem_results/.
 # Nothing is written into the repo folder. Override with e.g.
@@ -63,6 +101,9 @@
 #   GRANGER/granger_direction.csv                       pairs + population-level P(effect > 0)
 #   FIGURES/figure1_granger_network.{pdf,png}            Figure 1 (+ figure1_edges.csv)
 #   FIGURES/figure2_vocabulary_network.{pdf,png}         Figure 2 (+ figure2_terms.csv)
+#   TABLES/table_S1_granger_pairs.csv, table_S2_step2_blocks.csv   supplementary tables
+#   PERMUTATIONS/perm_<k>/                              permutation runs
+#   PERMUTATIONS/permutation_null_*.csv, _report.txt    permutation p-values
 #   logs/                                               one log per task
 #
 # Cluster settings below match the original runs (CSF3-style "himem"
@@ -91,6 +132,18 @@ STEP2_WEIGHTS="${STEP2_WEIGHTS:-stacking}"     # step2b: stacking or pseudobma m
 FIGURE="${FIGURE:-both}"             # figures stage: 1, 2 or both
 FIG1_RULE="${FIG1_RULE:-mean}"       # Figure 1 positive rule: mean or pop
 FIG1_PROB="${FIG1_PROB:-0.95}"       # probability cut-off when FIG1_RULE=pop
+FIG1_Z="${FIG1_Z:-z_score}"          # Figure 1 z: z_score | z_child | z_block
+FIG1_SHOW="${FIG1_SHOW:-all}"        # Figure 1: all (weak edges dashed) | strong
+STEP1_SESSION="${STEP1_SESSION:-0}"  # Step 1 options (fitVAR.R); defaults = reported run
+STEP1_ONSET="${STEP1_ONSET:-0}"
+STEP1_LAG_STEP="${STEP1_LAG_STEP:-1}"
+GRANGER_BLOCK_ROWS="${GRANGER_BLOCK_ROWS:-20}"  # rows per block for the block SE
+PERM_N="${PERM_N:-100}"              # permutation null: number of permutations
+PERM_CHAINS="${PERM_CHAINS:-2}"      #   MCMC chains per Step 2 model in permutation runs
+PERM_ITER="${PERM_ITER:-500}"        #   warm-up (= sampling) iterations per chain
+PERM_MAX_RUNNING="${PERM_MAX_RUNNING:-100}"  # max permutation tasks running at once
+PERM_SEED_BASE="${PERM_SEED_BASE:-20261112}" # permutation k uses seed PERM_SEED_BASE + k
+MEM_PERM="${MEM_PERM:-16G}"          # permutation tasks read the small bridge file only
 STEP2_SEED="${STEP2_SEED:-}"         # blank = each Step 2 job draws a random seed
                                       #   (printed in its log and saved in its .rds);
                                       #   set a number to reproduce an earlier run
@@ -113,6 +166,8 @@ RUN_DIR="${RUN_DIR:-/scratch/q55362cb/dsem_results}"
 DATA_DIR="$RUN_DIR/data_full"   # data_full.zip is unzipped here, not in the repo
 STEP1_DIR="$RUN_DIR/MODELS-STEP1"
 GRANGER_DIR="$RUN_DIR/GRANGER"
+PERM_DIR="$RUN_DIR/PERMUTATIONS"
+BRIDGE_FILE="$PERM_DIR/bridge.rds"
 LOG_DIR="$RUN_DIR/logs"
 
 load_r() {
@@ -137,7 +192,7 @@ banner() {
 submit_stage() {
   local stage="$1"; shift
   sbatch --parsable -p "$PARTITION" -n 1 \
-    --export=ALL,STAGE="$stage",REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR",STEP2_SEED="$STEP2_SEED",FIGURE="$FIGURE",FIG1_RULE="$FIG1_RULE",FIG1_PROB="$FIG1_PROB",STEP2B_BLOCKS="$STEP2B_BLOCKS",STEP2B_MIN_INNER="$STEP2B_MIN_INNER",STEP2_WEIGHTS="$STEP2_WEIGHTS" \
+    --export=ALL,STAGE="$stage",REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR",STEP2_SEED="$STEP2_SEED",FIGURE="$FIGURE",FIG1_RULE="$FIG1_RULE",FIG1_PROB="$FIG1_PROB",FIG1_Z="$FIG1_Z",FIG1_SHOW="$FIG1_SHOW",STEP2B_BLOCKS="$STEP2B_BLOCKS",STEP2B_MIN_INNER="$STEP2B_MIN_INNER",STEP2_WEIGHTS="$STEP2_WEIGHTS",STEP1_SESSION="$STEP1_SESSION",STEP1_ONSET="$STEP1_ONSET",STEP1_LAG_STEP="$STEP1_LAG_STEP",GRANGER_BLOCK_ROWS="$GRANGER_BLOCK_ROWS",PERM_N="$PERM_N",PERM_CHAINS="$PERM_CHAINS",PERM_ITER="$PERM_ITER",PERM_SEED_BASE="$PERM_SEED_BASE" \
     "$@" "$SELF"
 }
 
@@ -157,7 +212,8 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
 
   # --- preflight checks ---
   for f in fitVAR.R granger_analysis.R select_terms_for_individual_behaviours.R \
-           final_term_weighting.R check_convergence.R make_figures.R granger_direction.R CDI_data.csv; do
+           final_term_weighting.R check_convergence.R make_figures.R granger_direction.R \
+           make_tables.R make_bridge.R permutation_null.R CDI_data.csv; do
     [[ -f "$REPO_DIR/$f" ]] || { echo "Missing $REPO_DIR/$f" >&2; exit 1; }
   done
   mkdir -p "$RUN_DIR" 2>/dev/null && [[ -w "$RUN_DIR" ]] \
@@ -182,6 +238,21 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
 
   mkdir -p "$STEP1_DIR" "$GRANGER_DIR" "$LOG_DIR" "$RUN_DIR/tmp"
   ln -sfn "$DATA_DIR" "$STEP1_DIR/data_full"   # fitVAR.R reads ./data_full
+
+  # Step 1 options are recorded per run folder; refuse to mix them.
+  opts="session=$STEP1_SESSION onset=$STEP1_ONSET lag_step=$STEP1_LAG_STEP"
+  opts_file="$RUN_DIR/step1_options.txt"
+  if [[ "$WHAT" == submit || "$WHAT" == step1 ]]; then
+    if [[ -f "$opts_file" ]] && [[ "$(cat "$opts_file")" != "$opts" ]]; then
+      echo "This RUN_DIR was used with Step 1 options '$(cat "$opts_file")', not '$opts'." >&2
+      echo "Use a new RUN_DIR for a different Step 1 variant." >&2; exit 1
+    fi
+    if [[ ! -f "$opts_file" ]] && compgen -G "$STEP1_DIR/dsem_step1_*.rds" >/dev/null && [[ "$opts" != "session=0 onset=0 lag_step=1" ]]; then
+      echo "$STEP1_DIR already holds Step 1 fits made without options; use a new RUN_DIR for '$opts'." >&2; exit 1
+    fi
+    echo "$opts" > "$opts_file"
+    echo "Step 1 options: $opts"
+  fi
 
   n_beh=${#BEHAVIOURS[@]}
   dep() { [[ "$WHAT" == submit && -n "$1" ]] && echo "--dependency=afterok:$1"; }
@@ -228,6 +299,47 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     JF=$(submit_stage figures -J dsem_figures -t 0-1 --mem=8G $fig_dep -o "$LOG_DIR/figures.out")
     echo "Figures  (Figures 1 and 2):                 job $JF"
   fi
+  if [[ "$WHAT" == submit || "$WHAT" == tables ]]; then
+    tab_dep=""
+    [[ "$WHAT" == submit ]] && tab_dep="--dependency=afterany:${JGD}:${J2B}"
+    JT=$(submit_stage tables -J dsem_tables -t 0-1 --mem=8G $tab_dep -o "$LOG_DIR/tables.out")
+    echo "Tables   (supplementary tables S1, S2):     job $JT"
+  fi
+
+  # ---- permutation null for Step 2 (not part of the default submission) ----
+  if [[ "$WHAT" == permutations || "$WHAT" == bridge || "$WHAT" == perm2a || "$WHAT" == perm2b \
+        || "$WHAT" == perm_summary ]]; then
+    mkdir -p "$PERM_DIR"
+    pdep() { [[ "$WHAT" == permutations && -n "$1" ]] && echo "--dependency=afterany:$1"; }
+    JB=""; JP2A=""; JP2B=""
+    if [[ "$WHAT" == permutations || "$WHAT" == bridge ]]; then
+      if [[ "$WHAT" == bridge || ! -s "$BRIDGE_FILE" ]]; then
+        JB=$(submit_stage bridge -J dsem_bridge -t 0-6 $(mem_flag "$MEM_STEP2") -o "$LOG_DIR/bridge.out")
+        echo "Bridge   (Step 1 summaries for Step 2):     job $JB"
+      fi
+    fi
+    if [[ "$WHAT" == permutations || "$WHAT" == perm2a ]]; then
+      n_tasks=$((PERM_N * n_beh))
+      bdep=""; [[ -n "$JB" ]] && bdep="--dependency=afterok:$JB"
+      JP2A=$(submit_stage perm2a -J dsem_perm2a -t "$TIME_LONG" --mem="$MEM_PERM" $bdep \
+               --array=0-$((n_tasks - 1))%"$PERM_MAX_RUNNING" -o "$LOG_DIR/perm2a_%a.out")
+      echo "Perm 2a  ($PERM_N permutations x $n_beh behaviours):  job $JP2A"
+    fi
+    if [[ "$WHAT" == permutations || "$WHAT" == perm2b ]]; then
+      JP2B=$(submit_stage perm2b -J dsem_perm2b -t "$TIME_LONG" --mem="$MEM_PERM" $(pdep "$JP2A") \
+               --array=1-"$PERM_N"%"$PERM_MAX_RUNNING" -o "$LOG_DIR/perm2b_%a.out")
+      echo "Perm 2b  ($PERM_N permutations):              job $JP2B"
+    fi
+    if [[ "$WHAT" == permutations || "$WHAT" == perm_summary ]]; then
+      JPS=$(submit_stage perm_summary -J dsem_perm_summary -t 0-2 --mem=8G $(pdep "$JP2B") \
+              -o "$LOG_DIR/perm_summary.out")
+      echo "Summary  (permutation p-values):            job $JPS"
+      if [[ "$WHAT" == permutations ]]; then
+        JT=$(submit_stage tables -J dsem_tables -t 0-1 --mem=8G --dependency=afterany:$JPS -o "$LOG_DIR/tables.out")
+        echo "Tables   (with permutation p-values):       job $JT"
+      fi
+    fi
+  fi
   echo "Monitor with: squeue -u \$USER    Logs: $LOG_DIR"
   exit 0
 fi
@@ -257,7 +369,8 @@ granger)
   ln -s "$STEP1_DIR"/dsem_step1_*.rds "$shard_dir"/
   echo "Using $(find "$shard_dir" -maxdepth 1 -name 'dsem_step1_*.rds' | wc -l) Step 1 files"
   Rscript "$REPO_DIR/granger_analysis.R" "$shard_dir" "$GRANGER_PREFIX" \
-    array_task_id="$SLURM_ARRAY_TASK_ID" array_task_count="$GRANGER_SHARDS"
+    array_task_id="$SLURM_ARRAY_TASK_ID" array_task_count="$GRANGER_SHARDS" \
+    block_rows="$GRANGER_BLOCK_ROWS"
   ;;
 
 granger_combine)
@@ -279,6 +392,8 @@ cat("Combined", length(files), "shard files ->", nrow(res), "directed pairs (pap
 pos  <- res$supports_x_granger_causing_y & res$mean_coef_x_to_y > 0
 cat("ELPD improved AND positive mean coefficient:", sum(pos), "(paper: 19)\n")
 cat("  ...of which z > 2:", sum(pos & res$strong_support_diff_gt_2se), "(paper: 10)\n")
+for (z in intersect(c("z_child", "z_block"), names(res)))
+  cat("  ...of which", z, "> 2:", sum(pos & res[[z]] > 2, na.rm = TRUE), "\n")
 cat("Strongest edge:", res$predictor_x[1], "->", res$outcome_y[1], "(paper: gaze -> contingent)\n")
 cat("Saved", out, "\n")
 EOF
@@ -310,7 +425,60 @@ figures)
   banner "Figures 1 and 2"
   load_r
   Rscript "$REPO_DIR/make_figures.R" "$RUN_DIR" "$RUN_DIR/FIGURES" figure="$FIGURE" \
-    rule="$FIG1_RULE" prob="$FIG1_PROB"
+    rule="$FIG1_RULE" prob="$FIG1_PROB" z="$FIG1_Z" show="$FIG1_SHOW"
+  ;;
+
+tables)
+  banner "Supplementary tables"
+  load_r
+  Rscript "$REPO_DIR/make_tables.R" "$RUN_DIR" "$RUN_DIR/TABLES"
+  ;;
+
+bridge)
+  banner "make_bridge.R (Step 1 summaries for the permutation runs)"
+  load_r
+  mkdir -p "$PERM_DIR"
+  Rscript "$REPO_DIR/make_bridge.R" "$STEP1_DIR" "$BRIDGE_FILE"
+  ;;
+
+perm2a)
+  n_beh=${#BEHAVIOURS[@]}
+  k=$(( SLURM_ARRAY_TASK_ID / n_beh + 1 ))
+  b="${BEHAVIOURS[$(( SLURM_ARRAY_TASK_ID % n_beh ))]}"
+  pdir="$PERM_DIR/perm_$(printf '%03d' "$k")"
+  banner "Permutation $k, Step 2a ($b)"
+  out="$pdir/dsem_selection_${b}_single_behaviour.rds"
+  if [[ -s "$out" ]]; then echo "Exists, skipping: $out"; exit 0; fi
+  [[ -s "$BRIDGE_FILE" ]] || { echo "Missing $BRIDGE_FILE (run the bridge stage)" >&2; exit 1; }
+  load_r; use_private_tmp
+  mkdir -p "$pdir"
+  cd "$REPO_DIR"                 # script reads ./CDI_data.csv
+  Rscript "$REPO_DIR/select_terms_for_individual_behaviours.R" "$b" "$STEP1_DIR" \
+    bridge="$BRIDGE_FILE" out_dir="$pdir" permute_seed=$(( PERM_SEED_BASE + k )) \
+    seed=$(( PERM_SEED_BASE + 1000 * k )) chains="$PERM_CHAINS" iter="$PERM_ITER"
+  ;;
+
+perm2b)
+  k="$SLURM_ARRAY_TASK_ID"
+  pdir="$PERM_DIR/perm_$(printf '%03d' "$k")"
+  banner "Permutation $k, Step 2b"
+  if [[ -s "$pdir/$STEP2B_PREFIX.rds" ]]; then echo "Exists, skipping: $pdir/$STEP2B_PREFIX.rds"; exit 0; fi
+  n_sel=$(find "$pdir" -maxdepth 1 -name 'dsem_selection_*_single_behaviour.rds' 2>/dev/null | wc -l)
+  if [[ "$n_sel" -ne ${#BEHAVIOURS[@]} ]]; then
+    echo "Only $n_sel of ${#BEHAVIOURS[@]} Step 2a files in $pdir; skipping (resubmit perm2a, then perm2b)" >&2; exit 1
+  fi
+  load_r; use_private_tmp
+  cd "$REPO_DIR"
+  Rscript "$REPO_DIR/final_term_weighting.R" "$pdir" "$STEP1_DIR" "$STEP2B_PREFIX" \
+    bridge="$BRIDGE_FILE" permute_seed=$(( PERM_SEED_BASE + k )) seed=$(( PERM_SEED_BASE + 1000 * k )) \
+    blocks="$STEP2B_BLOCKS" min_inner="$STEP2B_MIN_INNER" weights="$STEP2_WEIGHTS" \
+    chains="$PERM_CHAINS" iter="$PERM_ITER"
+  ;;
+
+perm_summary)
+  banner "permutation_null.R"
+  load_r
+  Rscript "$REPO_DIR/permutation_null.R" "$RUN_DIR" "$STEP2B_PREFIX"
   ;;
 
 step2b)
@@ -324,7 +492,7 @@ step2b)
   ;;
 
 *)
-  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | granger_direction | step2a | step2b | figures" >&2
+  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | granger_direction | step2a | step2b | figures | tables | permutations | bridge | perm2a | perm2b | perm_summary" >&2
   exit 1
   ;;
 esac

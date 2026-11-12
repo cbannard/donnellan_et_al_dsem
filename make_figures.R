@@ -5,7 +5,8 @@
 #
 # Usage:
 #   Rscript make_figures.R <run_dir> [output_folder] [figure=1|2|both] [threshold=0.333]
-#                          [rule=mean|pop] [prob=0.95]
+#                          [rule=mean|pop] [prob=0.95] [z=z_score|z_child|z_block]
+#                          [show=all|strong]
 #
 #   run_dir        the pipeline's RUN_DIR (holds GRANGER/ and MODELS-STEP1/)
 #   output_folder  default: <run_dir>/FIGURES
@@ -16,6 +17,12 @@
 #                    pop  — population-level effect (A_pop summed over the 5 lags)
 #                           with P(effect > 0) >= prob; needs granger_direction.R output
 #   prob=          probability cut-off for rule=pop (default 0.95)
+#   z=             which z-score sets "strong support" (z > 2), arrow width
+#                  and colour: z_score (default; observation-level SE),
+#                  z_child (child-clustered SE) or z_block (block SE); the
+#                  last two need the current granger_analysis.R output
+#   show=          all (default): every edge passing the rule, strong edges
+#                  (z > 2) solid and the others dashed; strong: strong edges only
 #
 # Figure 1 (Step 1b, granger_analysis.R)
 #   Input: GRANGER/granger_loocv_pairwise_elpd.csv
@@ -55,6 +62,12 @@ fig1_rule <- if (length(rule_arg)) tolower(rule_arg[length(rule_arg)]) else "mea
 if (!fig1_rule %in% c("mean", "pop")) stop("rule= must be mean or pop")
 prob_arg  <- sub("^prob=", "", keyed[grepl("^prob=", keyed)])
 fig1_prob <- if (length(prob_arg)) as.numeric(prob_arg) else 0.95
+z_arg     <- sub("^z=", "", keyed[grepl("^z=", keyed)])
+fig1_z    <- if (length(z_arg)) z_arg[length(z_arg)] else "z_score"
+if (!fig1_z %in% c("z_score", "z_child", "z_block")) stop("z= must be z_score, z_child or z_block")
+show_arg  <- sub("^show=", "", keyed[grepl("^show=", keyed)])
+fig1_show <- if (length(show_arg)) tolower(show_arg[length(show_arg)]) else "all"
+if (!fig1_show %in% c("all", "strong")) stop("show= must be all or strong")
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
 suppressPackageStartupMessages(library(ggplot2))
@@ -194,30 +207,45 @@ if (!do_fig1) {
   message("Figure 1 not requested (figure=", which_fig, ")")
 } else if (file.exists(granger_csv)) {
   g <- read.csv(granger_csv, stringsAsFactors = FALSE)
+  if (!fig1_z %in% names(g)) stop("Column ", fig1_z, " not in ", granger_csv,
+                                  " (re-run granger_analysis.R with the current code)")
+  g$z_use <- g[[fig1_z]]
   positive <- if (fig1_rule == "pop") g$pop_prob_positive >= fig1_prob else g$mean_coef_x_to_y > 0
   rule_txt <- if (fig1_rule == "pop") sprintf("population effect P(> 0) >= %.2f", fig1_prob) else "mean coefficient > 0"
   shown <- g[g$elpd_diff_full_minus_reduced > 0 & positive, ]
-  shown <- shown[order(shown$z_score), ]
-  message(sprintf("Figure 1: %d of %d directed pairs shown (ELPD improved and %s); %d with z > 2",
-                  nrow(shown), nrow(g), rule_txt, sum(shown$z_score > 2, na.rm = TRUE)))
+  shown$strong <- !is.na(shown$z_use) & shown$z_use > 2
+  if (fig1_show == "strong") shown <- shown[shown$strong, ]
+  shown <- shown[order(shown$z_use), ]
+  message(sprintf("Figure 1: %d of %d directed pairs shown (ELPD improved and %s%s); %d with %s > 2",
+                  nrow(shown), nrow(g), rule_txt, if (fig1_show == "strong") ", strong only" else "",
+                  sum(shown$strong), fig1_z))
   write.csv(shown, file.path(out_dir, "figure1_edges.csv"), row.names = FALSE)
 
   e <- edge_geometry(data.frame(from = shown$predictor_x, to = shown$outcome_y,
-                                z = pmax(shown$z_score, 0), stringsAsFactors = FALSE))
+                                z = pmax(shown$z_use, 0),
+                                support = factor(ifelse(shown$strong, "strong", "weak"),
+                                                 levels = c("strong", "weak")),
+                                stringsAsFactors = FALSE))
   p1 <- base_plot()
   if (nrow(e) > 0) {
     zmax <- max(e$z, 2)
-    sc_col <- scale_colour_gradient(low = "#F9C9B6", high = "#B2182B", limits = c(0, zmax), name = "z")
+    zname <- c(z_score = "z", z_child = "z\n(child-\nclustered)", z_block = "z\n(block SE)")[[fig1_z]]
+    sc_col <- scale_colour_gradient(low = "#F9C9B6", high = "#B2182B", limits = c(0, zmax), name = zname)
     sc_lw  <- scale_linewidth(range = c(0.4, 2.6), limits = c(0, zmax), guide = "none")
+    sc_lt  <- scale_linetype_manual(values = c(strong = "solid", weak = "22"), drop = TRUE,
+                                    name = "Support",
+                                    labels = c(strong = "strong (z > 2)", weak = "weak (0 < z <= 2)"))
     if (any(e$bidirectional))
       p1 <- p1 + geom_curve(data = e[e$bidirectional, ],
-                            aes(x, y, xend = xend, yend = yend, colour = z, linewidth = z),
-                            curvature = 0.25, arrow = arrow_spec, lineend = "round", key_glyph = key_line)
+                            aes(x, y, xend = xend, yend = yend, colour = z, linewidth = z, linetype = support),
+                            curvature = 0.25, arrow = arrow_spec, lineend = "butt", key_glyph = key_line)
     if (any(!e$bidirectional))
       p1 <- p1 + geom_segment(data = e[!e$bidirectional, ],
-                              aes(x, y, xend = xend, yend = yend, colour = z, linewidth = z),
-                              arrow = arrow_spec, lineend = "round", key_glyph = key_line)
-    p1 <- p1 + sc_col + sc_lw
+                              aes(x, y, xend = xend, yend = yend, colour = z, linewidth = z, linetype = support),
+                              arrow = arrow_spec, lineend = "butt", key_glyph = key_line)
+    p1 <- p1 + sc_col + sc_lw + sc_lt +
+      guides(linetype = guide_legend(override.aes = list(colour = "grey35", linewidth = 0.9), order = 2),
+             colour = guide_colourbar(order = 1))
   }
   p1 <- add_nodes(p1)
   save_fig(p1, "figure1_granger_network")

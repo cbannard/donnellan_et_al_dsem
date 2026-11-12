@@ -4,6 +4,28 @@
 # Usage:
 #   Rscript granger_analysis.R <step1_rds_or_folder> [output_prefix]
 #   Rscript granger_analysis.R <step1_rds_or_folder> [output_prefix] array_task_id=1 array_task_count=9
+#                              [block_rows=20]
+#
+# Standard errors of the ELPD difference (full minus reduced model):
+#   se_diff        the usual PSIS-LOO SE, treating every observation as
+#                  independent. With serially dependent samples this is too
+#                  small.
+#   se_diff_child  child-clustered SE: the pointwise differences are summed
+#                  within each child and the SE is computed across children
+#                  (sqrt(n_children * var(child sums))). Allows for any
+#                  dependence within a child's series.
+#   se_diff_block  block (batch-means) SE: the pointwise differences are
+#                  summed within consecutive blocks of block_rows modelled
+#                  time points within each child, and the SE is computed
+#                  across blocks. With the reported settings (every third
+#                  200 ms sample) 20 rows is about 12 s.
+# z_score, z_child and z_block are the ELPD difference divided by each SE.
+# Per-child sums of the pointwise differences are saved to
+# <prefix>_child_diffs.rds for further checks.
+#
+# The Step 1 options saved in $prep$options are honoured: with the session
+# option the session effects enter the linear predictor, and with the onset
+# option only the samples that entered the Step 1 likelihood are scored.
 #
 # Examples:
 #   Rscript granger_analysis.R dsem_step1_1.rds
@@ -28,6 +50,10 @@ parse_keyed_int <- function(keyed_args, key) {
   if (length(hit) == 0) return(NA_integer_)
   as.integer(sub(pat, "", hit[length(hit)]))
 }
+
+block_rows <- parse_keyed_int(keyed, "block_rows")
+if (is.na(block_rows)) block_rows <- 20L
+if (block_rows < 2L) stop("block_rows must be >= 2")
 
 array_task_id_keyed    <- parse_keyed_int(keyed, "array_task_id")
 array_task_count_keyed <- parse_keyed_int(keyed, "array_task_count")
@@ -82,7 +108,8 @@ combine_step1_results <- function(rds_list) {
 
 read_step1_input <- function(path) {
   if (is_dir(path)) {
-    files <- list.files(path, pattern = "\\.rds$", full.names = TRUE)
+    files <- list.files(path, pattern = "^dsem_step1_.*\\.rds$", full.names = TRUE)
+    if (length(files) == 0) files <- list.files(path, pattern = "\\.rds$", full.names = TRUE)
     if (length(files) == 0) stop("No .rds files found in folder: ", path)
     message("Reading and combining ", length(files), " RDS files from folder: ", path)
     step1   <- combine_step1_results(lapply(files, readRDS))
@@ -125,7 +152,14 @@ build_obs_index <- function(stan_data) {
   idx
 }
 
-build_y_block_data <- function(stan_data, obs_idx, y_idx, K) {
+build_y_block_data <- function(stan_data, obs_idx, y_idx, K, use_onset = FALSE,
+                               use_session = FALSE) {
+  if (use_onset) {
+    keep    <- stan_data$y_include[cbind(obs_idx[, "i"], obs_idx[, "t"], rep(y_idx, nrow(obs_idx)))] == 1L
+    obs_idx <- obs_idx[keep, , drop = FALSE]
+  }
+  # Rows in time order within each child (needed for the block SE).
+  obs_idx <- obs_idx[order(obs_idx[, "i"], obs_idx[, "t"]), , drop = FALSE]
   n_obs <- nrow(obs_idx)
   i_idx <- obs_idx[, "i"]
   t_idx <- obs_idx[, "t"]
@@ -133,7 +167,29 @@ build_y_block_data <- function(stan_data, obs_idx, y_idx, K) {
   X_mat <- matrix(0, nrow = n_obs, ncol = K)
   for (k in seq_len(K))
     X_mat[, k] <- as.numeric(stan_data$X_lag[cbind(i_idx, t_idx, rep(k, n_obs))])
-  list(person_idx = i_idx, y = y_vec, X = X_mat)
+  s_vec <- if (use_session) as.numeric(stan_data$session_x[cbind(i_idx, t_idx)]) else NULL
+  list(person_idx = i_idx, y = y_vec, X = X_mat, session = s_vec)
+}
+
+# Session effects delta_person[i, v] as a draws x N matrix for outcome v.
+extract_delta_matrix <- function(draws, N, v) {
+  nm <- sprintf("delta_person[%d,%d]", seq_len(N), v)
+  missing <- setdiff(nm, posterior::variables(draws))
+  if (length(missing)) stop("Session option set but draws lack ", missing[1])
+  unclass(posterior::as_draws_matrix(posterior::subset_draws(draws, variable = nm)))
+}
+
+# SEs of a sum of pointwise differences: independent, child-clustered, block.
+se_of_sum <- function(pt_diff, person_idx, block_rows) {
+  se_iid <- sqrt(length(pt_diff) * stats::var(pt_diff))
+  child_sums <- tapply(pt_diff, person_idx, sum)
+  se_child <- if (length(child_sums) > 1) sqrt(length(child_sums) * stats::var(child_sums)) else NA_real_
+  pos_in_child <- stats::ave(seq_along(pt_diff), person_idx, FUN = seq_along)
+  block_id <- paste(person_idx, (pos_in_child - 1L) %/% block_rows)
+  block_sums <- tapply(pt_diff, block_id, sum)
+  se_block <- if (length(block_sums) > 1) sqrt(length(block_sums) * stats::var(block_sums)) else NA_real_
+  list(se = se_iid, se_child = se_child, se_block = se_block,
+       child_sums = child_sums, n_blocks = length(block_sums))
 }
 
 loglik_binary <- function(eta, y_vec) {
@@ -164,7 +220,7 @@ loo_pointwise <- function(ll) {
 }
 
 # Precompute full-model log-likelihood and LOO for outcome y.
-prepare_y_cache <- function(y_dat, y_idx, z_mat, col_lookup, V, K) {
+prepare_y_cache <- function(y_dat, y_idx, z_mat, col_lookup, V, K, delta_mat = NULL) {
   S     <- nrow(z_mat)
   n_obs <- nrow(y_dat$X)
 
@@ -186,6 +242,8 @@ prepare_y_cache <- function(y_dat, y_idx, z_mat, col_lookup, V, K) {
 
     eta_full <- Ai %*% t(Xi)
     eta_full <- sweep(eta_full, 1, mui, "+")
+    if (!is.null(delta_mat))   # session effect: delta_i (per draw) x session_x (per row)
+      eta_full <- eta_full + outer(as.numeric(delta_mat[, i]), y_dat$session[rows])
 
     lp <- loo_pointwise(loglik_binary(eta_full, yi))
     pointwise_full[rows] <- lp$elpd_loo
@@ -209,12 +267,13 @@ prepare_y_cache <- function(y_dat, y_idx, z_mat, col_lookup, V, K) {
     person_cache   = person_cache,
     elpd_full      = sum(pointwise_full),
     pointwise_full = pointwise_full,
+    person_idx     = y_dat$person_idx,
     n_obs          = n_obs
   )
 }
 
 # Score a single x -> y pair against the cached full model.
-score_pair_from_cache <- function(y_cache, x_idx, K_per_pair) {
+score_pair_from_cache <- function(y_cache, x_idx, K_per_pair, block_rows) {
   n_obs  <- y_cache$n_obs
   pointwise_red <- rep(NA_real_, n_obs)
   block_k    <- as.integer(seq_len(K_per_pair) + (x_idx - 1L) * K_per_pair)
@@ -242,13 +301,17 @@ score_pair_from_cache <- function(y_cache, x_idx, K_per_pair) {
   elpd_red  <- sum(pointwise_red)
   elpd_diff <- elpd_full - elpd_red
   pt_diff   <- y_cache$pointwise_full - pointwise_red
-  se_diff   <- sqrt(length(pt_diff) * stats::var(pt_diff))
+  ses       <- se_of_sum(pt_diff, y_cache$person_idx, block_rows)
 
   list(
     elpd_full             = elpd_full,
     elpd_reduced          = elpd_red,
     elpd_diff             = elpd_diff,
-    se_diff               = se_diff,
+    se_diff               = ses$se,
+    se_diff_child         = ses$se_child,
+    se_diff_block         = ses$se_block,
+    n_blocks              = ses$n_blocks,
+    child_sums            = ses$child_sums,
     n_obs                 = n_obs,
     mean_coef_x_to_y      = mean_coef_x_to_y,
     prop_positive_x_to_y  = prop_positive_x_to_y,
@@ -274,6 +337,12 @@ N          <- stan_data$N
 K_per_pair <- as.integer(K / V)
 if (K %% V != 0L) stop("K must be divisible by V")
 is_binary <- as.logical(stan_data$is_binary)
+step1_opts  <- if (is.null(prep$options)) list() else prep$options
+use_onset   <- isTRUE(step1_opts$onset)
+use_session <- isTRUE(step1_opts$session)
+message("Step 1 options: session=", use_session, "  onset=", use_onset,
+        "  lag_step=", if (is.null(step1_opts$lag_step)) 1L else step1_opts$lag_step,
+        "  | block SE uses blocks of ", block_rows, " rows")
 # The Step 1 model is Bernoulli-logit only (no residual variance), so every
 # outcome must be binary.
 if (!all(is_binary))
@@ -320,7 +389,8 @@ obs_idx <- build_obs_index(stan_data)
 message("Precomputing y-specific design blocks...")
 y_blocks <- vector("list", V)
 for (y_idx in seq_len(V))
-  y_blocks[[y_idx]] <- build_y_block_data(stan_data, obs_idx, y_idx, K)
+  y_blocks[[y_idx]] <- build_y_block_data(stan_data, obs_idx, y_idx, K,
+                                          use_onset = use_onset, use_session = use_session)
 
 
 # =============================================================================
@@ -328,6 +398,7 @@ for (y_idx in seq_len(V))
 # =============================================================================
 
 results <- list()
+child_diffs <- list()
 message("Scoring directed pairs x -> y with ELPD...")
 
 for (y_idx in y_idx_assigned) {
@@ -343,7 +414,8 @@ for (y_idx in y_idx_assigned) {
     z_mat       = z_mat,
     col_lookup  = col_lookup,
     V           = V,
-    K           = K
+    K           = K,
+    delta_mat   = if (use_session) extract_delta_matrix(step1$draws, N, y_idx) else NULL
   )
 
   x_candidates <- setdiff(seq_len(V), y_idx)
@@ -352,7 +424,9 @@ for (y_idx in y_idx_assigned) {
     x_name <- behaviours[x_idx]
     message("  Pair ", x_name, " -> ", y_name)
 
-    pair_score <- score_pair_from_cache(y_cache, x_idx, K_per_pair)
+    pair_score <- score_pair_from_cache(y_cache, x_idx, K_per_pair, block_rows)
+    child_diffs[[paste(x_name, y_name, sep = "->")]] <- pair_score$child_sums
+    zdiv <- function(se) if (is.finite(se) && se > 0) pair_score$elpd_diff / se else NA_real_
 
     results[[length(results) + 1L]] <- data.frame(
       predictor_x                  = x_name,
@@ -365,6 +439,11 @@ for (y_idx in y_idx_assigned) {
       se_diff                      = pair_score$se_diff,
       z_score = if (is.finite(pair_score$se_diff) && pair_score$se_diff > 0)
         pair_score$elpd_diff / pair_score$se_diff else NA_real_,
+      se_diff_child                = pair_score$se_diff_child,
+      z_child                      = zdiv(pair_score$se_diff_child),
+      se_diff_block                = pair_score$se_diff_block,
+      z_block                      = zdiv(pair_score$se_diff_block),
+      n_blocks                     = pair_score$n_blocks,
       supports_x_granger_causing_y = pair_score$elpd_diff > 0,
       strong_support_diff_gt_2se   = if (is.finite(pair_score$se_diff) && pair_score$se_diff > 0)
         pair_score$elpd_diff > (2 * pair_score$se_diff) else FALSE,
@@ -400,6 +479,11 @@ if (length(results) > 0) {
     elpd_diff_full_minus_reduced = numeric(0),
     se_diff                      = numeric(0),
     z_score                      = numeric(0),
+    se_diff_child                = numeric(0),
+    z_child                      = numeric(0),
+    se_diff_block                = numeric(0),
+    z_block                      = numeric(0),
+    n_blocks                     = integer(0),
     supports_x_granger_causing_y = logical(0),
     strong_support_diff_gt_2se   = logical(0),
     mean_coef_x_to_y             = numeric(0),
@@ -413,6 +497,10 @@ csv_file <- file.path(out_dir, paste0(output_prefix_effective, "_pairwise_elpd.c
 rds_file <- file.path(out_dir, paste0(output_prefix_effective, "_pairwise_elpd.rds"))
 write.csv(results_df, csv_file, row.names = FALSE)
 saveRDS(results_df, rds_file)
+cd_file <- file.path(out_dir, paste0(output_prefix_effective, "_child_diffs.rds"))
+saveRDS(list(child_sums = child_diffs, participants = prep$participants,
+             block_rows = block_rows, step1_options = step1_opts), cd_file)
+message("Saved: ", cd_file)
 
 message("Total runtime (sec): ", format(round(proc.time()[["elapsed"]] - run_start_time, 1), nsmall = 1))
 message("Saved: ", csv_file)
