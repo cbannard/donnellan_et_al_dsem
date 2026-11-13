@@ -411,8 +411,16 @@ baseline_shared_elpd <- as.numeric(
 )
 
 combo_results <- list()
+loop_start <- proc.time()[["elapsed"]]
 
 for (ci in seq_along(all_combos)) {
+  # Progress line (read by monitor_progress.sh)
+  if (ci == 1L || ci %% 25L == 0L || ci == length(all_combos)) {
+    el <- proc.time()[["elapsed"]] - loop_start
+    message(sprintf("Progress %d/%d (%.1f%%) | elapsed %.1f min | ETA %.1f min",
+                    ci, length(all_combos), 100 * ci / length(all_combos), el / 60,
+                    if (ci > 1L) el / (ci - 1L) * (length(all_combos) - ci + 1L) / 60 else NA_real_))
+  }
   combo       <- all_combos[[ci]]
   trial_local <- sort(unique(unlist(block_defs[combo])))
   trial_cols  <- q_cols[trial_local]

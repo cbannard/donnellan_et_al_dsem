@@ -10,8 +10,7 @@
 # shows what has finished and, for tasks still running, how far they are:
 #   Step 1     sampler iteration of each chain (from its log)
 #   Granger    directed pairs scored (8 per shard)
-#   Step 2a    models fitted out of 1,024 (counted from CmdStan output files
-#              in the task's private temp folder), with an ETA
+#   Step 2a    the task's own progress line (models out of 1,024, ETA)
 #   Step 2b    the script's own progress line (models out of 511, ETA)
 #   Perms      permutation files finished out of PERM_N x 9 (2a) and PERM_N
 #              (2b), plus the progress of running 2a tasks
@@ -22,7 +21,6 @@ RUN_DIR="${1:-${RUN_DIR:-}}"
 LOG="$RUN_DIR/logs"; TMP="$RUN_DIR/tmp"
 BEHAVIOURS=(contingent gaze CV non_CV index_point open_point give show other_gesture)
 PERM_N="${PERM_N:-100}"
-N_COMBOS_2A=1024   # 1,023 block combinations + intercept-only
 
 # Seconds from a Slurm elapsed time ([D-]HH:MM:SS or MM:SS)
 secs() {
@@ -68,27 +66,14 @@ done
 [[ $shards -gt 0 ]] && echo "  GRANGER total: $tot / 72 pairs scored"
 echo
 
-# ---- Step 2a / perm2a: count fitted models in a task's temp folder ------------
-# cmdstanr writes one CSV per chain per model into the task's temp folder.
-fits_done() {   # $1 = raw job id, $2 = array index, $3 = chains per model
-  local d="$TMP/${1}_${2}"
-  [[ -d "$d" ]] || { echo 0; return; }
-  local n; n=$(find "$d" -name '*.csv' 2>/dev/null | wc -l)
-  echo $(( n / $3 ))
-}
-# Fitting rate is measured from the first model's output, not from the job
-# start: loading the Step 1 draws (observed Step 2a) can take half an hour.
-show_2a_task() {   # $1 label, $2 raw id, $3 idx, $4 elapsed, $5 chains
-  local f; f=$(fits_done "$2" "$3" "$5")
-  local s; s=$(secs "$4")
-  local eta="?"
-  local first; first=$(find "$TMP/${2}_${3}" -name '*.csv' -printf '%T@\n' 2>/dev/null | sort -n | head -1)
-  if [[ $f -gt 20 && -n "$first" ]]; then
-    local fit_s=$(( $(date +%s) - ${first%.*} ))
-    [[ $fit_s -gt 0 ]] && eta=$(hm $(( fit_s * (N_COMBOS_2A - f) / f )))
-  fi
-  printf "  %-26s %4d / %d models (%3d%%)  elapsed %-8s ETA %s\n" "$1" "$f" "$N_COMBOS_2A" \
-    $(( 100 * f / N_COMBOS_2A )) "$(hm "$s")" "$eta"
+# ---- Step 2a / perm2a: progress line from the task's log ----------------------
+# (Counting CmdStan output files does not work: cmdstanr deletes them when a
+# fit is garbage-collected.) Tasks started with older code print no progress
+# lines; for them only the elapsed time is shown.
+show_2a_task() {   # $1 label, $2 log file, $3 elapsed
+  local p=""
+  [[ -f "$2" ]] && p=$(grep -a "^Progress" "$2" | tail -1)
+  printf "  %-26s elapsed %-8s %s\n" "$1" "$(hm "$(secs "$3")")" "${p:-(no progress line)}"
 }
 
 n2a=$(ls "$RUN_DIR"/MODELS-STEP1/dsem_selection_*_single_behaviour.rds 2>/dev/null | wc -l)
@@ -96,7 +81,7 @@ echo "STEP 2a  behaviours finished: $n2a / 9"
 while read -r jid name el raw; do
   [[ "$name" == dsem_step2a ]] || continue
   idx=${jid##*_}
-  show_2a_task "${BEHAVIOURS[$idx]}" "$raw" "$idx" "$el" 4
+  show_2a_task "${BEHAVIOURS[$idx]}" "$LOG/step2a_${idx}.out" "$el"
 done <<< "$running"
 echo
 
@@ -136,7 +121,7 @@ if [[ -d "$PD" ]]; then
     while read -r jid name el raw; do
       [[ "$name" == dsem_perm2a ]] || continue
       idx=${jid##*_}; k=$(( idx / 9 + 1 ))
-      show_2a_task "perm $k ${BEHAVIOURS[$(( idx % 9 ))]}" "$raw" "$idx" "$el" "${PERM_CHAINS:-2}"
+      show_2a_task "perm $k ${BEHAVIOURS[$(( idx % 9 ))]}" "$LOG/perm2a_${idx}.out" "$el"
     done <<< "$running" | head -20
     [[ $nrun -gt 20 ]] && echo "  ... ($((nrun - 20)) more)"
   fi
