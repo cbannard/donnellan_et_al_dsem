@@ -29,6 +29,21 @@
 #                  p_single_max < alpha) if present, otherwise the two-level
 #                  results (p_final_max and p_inner both < alpha)
 #   alpha=         significance level for perm (default 0.05)
+#   weight=        what Figure 2's links show (default inclusion):
+#                    inclusion — final inclusion probability (two-level model
+#                                averaging); blocks chosen by threshold=
+#                    gain — strength of evidence from the single-block test
+#                           (single_block_test.R): every block that on its
+#                           own improves leave-one-child-out prediction of
+#                           vocabulary (ELPD gain > min_gain, default 0), line
+#                           width = ELPD gain over the intercept-only model
+#                    perm — as gain, but line width = -log10(permutation p of
+#                           the block, p_single)
+#                  With gain/perm, colour = sign of the block's effect in its
+#                  single-block model, a node ring = the mean rate (ring width
+#                  = its evidence), solid lines = p_single < alpha
+#                  (uncorrected), dashed = not.
+#   min_gain=      minimum ELPD gain for weight=gain|perm (default 0)
 #   rule=          Figure 1 "positive relation" rule:
 #                    mean (default) — pooled mean lag coefficient > 0
 #                    pop  — population-level effect (A_pop summed over the 5 lags)
@@ -75,6 +90,11 @@ if (thr_mode != "perm" && (is.na(threshold) || threshold < 0 || threshold > 1))
 perm_arg  <- sub("^perm=", "", keyed[grepl("^perm=", keyed)])
 perm_mode <- if (length(perm_arg)) tolower(perm_arg[length(perm_arg)]) else "auto"
 if (!perm_mode %in% c("auto", "0", "1")) stop("perm= must be auto, 0 or 1")
+w2_arg    <- sub("^weight=", "", keyed[grepl("^weight=", keyed)])
+fig2_weight <- if (length(w2_arg)) tolower(w2_arg[length(w2_arg)]) else "inclusion"
+if (!fig2_weight %in% c("inclusion", "gain", "perm")) stop("weight= must be inclusion, gain or perm")
+mg_arg    <- sub("^min_gain=", "", keyed[grepl("^min_gain=", keyed)])
+fig2_min_gain <- if (length(mg_arg)) as.numeric(mg_arg) else 0
 alpha_arg <- sub("^alpha=", "", keyed[grepl("^alpha=", keyed)])
 perm_alpha <- if (length(alpha_arg)) as.numeric(alpha_arg) else 0.05
 fig_arg   <- sub("^figure=", "", keyed[grepl("^figure=", keyed)])
@@ -287,6 +307,78 @@ if (!do_fig1) {
 if (!do_fig2) {
   message("Figure 2 not requested (figure=", which_fig, ")")
 } else if (file.exists(coefs_csv)) {
+  sb_csv <- file.path(run_dir, "PERMUTATIONS", "single_block_null.csv")
+  if (fig2_weight != "inclusion") {
+    # ---------------- Figure 2 weighted by single-block evidence ----------------
+    if (!file.exists(sb_csv)) stop("weight=", fig2_weight, " needs ", sb_csv, " (run the single_block stage)")
+    sb <- read.csv(sb_csv, stringsAsFactors = FALSE)
+    sb <- sb[!is.na(sb$elpd_gain) & sb$elpd_gain > fig2_min_gain, ]
+    sb$w <- if (fig2_weight == "gain") sb$elpd_gain else -log10(sb$p_single)
+    sb$direction <- ifelse(sb$effect_mean > 0, "positive", "negative")
+    sb$sig <- factor(ifelse(!is.na(sb$p_single) & sb$p_single < perm_alpha, "sig", "ns"), levels = c("sig", "ns"))
+    is_mean <- grepl("^mean ", sb$block)
+    edges <- data.frame(from = sub(" -> .*$", "", sb$block[!is_mean]), to = sub("^.* -> ", "", sb$block[!is_mean]),
+                        weight = sb$w[!is_mean], direction = sb$direction[!is_mean], sig = sb$sig[!is_mean],
+                        elpd_gain = sb$elpd_gain[!is_mean], p_single = sb$p_single[!is_mean],
+                        stringsAsFactors = FALSE)
+    edges <- edges[order(edges$weight), ]
+    means <- data.frame(behaviour = sub("^mean ", "", sb$block[is_mean]), weight = sb$w[is_mean],
+                        direction = sb$direction[is_mean], elpd_gain = sb$elpd_gain[is_mean],
+                        p_single = sb$p_single[is_mean], stringsAsFactors = FALSE)
+    message(sprintf("Figure 2 (weight=%s): %d lag blocks and %d means with ELPD gain > %g; %d with p_single < %.2f",
+                    fig2_weight, nrow(edges), nrow(means), fig2_min_gain,
+                    sum(sb$sig == "sig"), perm_alpha))
+    write.csv(rbind(
+      data.frame(type = ifelse(edges$from == edges$to, "self-lag", "cross-lag"), from = edges$from, to = edges$to,
+                 weight = edges$weight, elpd_gain = edges$elpd_gain, p_single = edges$p_single, direction = edges$direction),
+      data.frame(type = rep("mean", nrow(means)), from = means$behaviour, to = means$behaviour, weight = means$weight,
+                 elpd_gain = means$elpd_gain, p_single = means$p_single, direction = means$direction)),
+      file.path(out_dir, "figure2_terms.csv"), row.names = FALSE)
+
+    wmax <- max(c(edges$weight, means$weight, 1e-6))
+    wlim <- c(0, wmax)
+    lw_of <- function(w) 0.3 + 2.7 * w / wmax           # same mapping as the line-width scale
+    cross <- edge_geometry(edges[edges$from != edges$to, ])
+    loops <- loop_paths(edges[edges$from == edges$to, ])
+    edge_aes <- aes(x, y, xend = xend, yend = yend, colour = direction, linewidth = weight, linetype = sig)
+    loop_aes <- aes(px, py, group = from, colour = direction, linewidth = weight, linetype = sig)
+    p2 <- base_plot()
+    if (!is.null(cross) && nrow(cross) > 0) {
+      if (any(cross$bidirectional))
+        p2 <- p2 + geom_curve(data = cross[cross$bidirectional, ], mapping = edge_aes,
+                              curvature = 0.25, arrow = arrow_spec, lineend = "butt", key_glyph = key_line)
+      if (any(!cross$bidirectional))
+        p2 <- p2 + geom_segment(data = cross[!cross$bidirectional, ], mapping = edge_aes,
+                                arrow = arrow_spec, lineend = "butt", key_glyph = key_line)
+    }
+    if (!is.null(loops))
+      p2 <- p2 + geom_path(data = loops, mapping = loop_aes,
+                           arrow = arrow(length = unit(0.13, "inches"), type = "closed", angle = 22),
+                           lineend = "butt", key_glyph = key_line)
+    p2 <- add_nodes(p2, loop_nodes = edges$from[edges$from == edges$to])
+    # Mean rates: a ring round the node, coloured by direction, width = evidence.
+    dir_col <- c(positive = RED, negative = BLUE)
+    a <- seq(0, 2 * pi, length.out = 60)
+    for (i in seq_len(nrow(means))) {
+      n <- nodes[nodes$name == means$behaviour[i], ]
+      ring_df <- data.frame(cx = n$x + NODE_R * cos(a), cy = n$y + NODE_R * sin(a))
+      p2 <- p2 + geom_polygon(data = ring_df, aes(cx, cy), fill = NA, colour = dir_col[[means$direction[i]]],
+                              linewidth = lw_of(means$weight[i]),
+                              linetype = if (means$p_single[i] < perm_alpha) "solid" else "22")
+    }
+    w_name <- if (fig2_weight == "gain") "ELPD gain\nover intercept-\nonly model" else "Evidence\n(-log10 p)"
+    brks <- pretty(wlim, 3); brks <- brks[brks > 0 & brks <= wmax]
+    p2 <- p2 +
+      scale_colour_manual(values = dir_col, name = "Vocabulary",
+                          labels = c(positive = "higher (positive)", negative = "lower (negative)"), drop = FALSE) +
+      scale_linewidth(range = c(0.3, 3), limits = wlim, name = w_name, breaks = brks) +
+      scale_linetype_manual(values = c(sig = "solid", ns = "22"), drop = FALSE,
+                            name = "Permutation test\n(single block)",
+                            labels = c(sig = sprintf("p < %.2f (uncorrected)", perm_alpha), ns = "not significant")) +
+      guides(linewidth = guide_legend(override.aes = list(colour = "grey35")),
+             linetype  = guide_legend(override.aes = list(colour = "grey35", linewidth = 0.9)))
+    save_fig(p2, "figure2_vocabulary_network")
+  } else {
   cf <- read.csv(coefs_csv, stringsAsFactors = FALSE)
   is_A  <- grepl("^A\\[", cf$term_label)
   is_mu <- grepl("^mu\\[", cf$term_label)
@@ -317,7 +409,6 @@ if (!do_fig2) {
   # (each block alone vs intercept-only; familywise p_single_max). Otherwise
   # the two-level results, where a block counts only if BOTH its familywise
   # final p and its within-group p are below alpha.
-  sb_csv   <- file.path(run_dir, "PERMUTATIONS", "single_block_null.csv")
   have_any <- file.exists(sb_csv) || file.exists(perm_blocks_csv)
   use_perm <- perm_mode == "1" || (perm_mode == "auto" && have_any)
   if (use_perm && !have_any) stop("perm=1 needs ", sb_csv, " or ", perm_blocks_csv)
@@ -399,6 +490,7 @@ if (!do_fig2) {
                                                 ns = "not significant")) +
       guides(linetype = guide_legend(override.aes = list(colour = "grey35", linewidth = 0.9)))
   save_fig(p2, "figure2_vocabulary_network")
+  }
 } else {
   message("Figure 2 skipped: ", coefs_csv, " not found (run step2a + step2b first)")
 }
