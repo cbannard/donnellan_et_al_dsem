@@ -95,6 +95,13 @@
 #   batches (e.g. PERM_N=20 first, later PERM_N=100). Re-run only the summary
 #   with:  bash run_dsem_pipeline.slurm perm_summary
 #
+#   Single-block test (each predictor block alone vs intercept-only, with the
+#   same shuffles; needs the bridge file, so run after/with permutations):
+#     bash run_dsem_pipeline.slurm single_block
+#   Submits PERM_N + 1 tasks (observed + shuffles, ~15 min each) -> summary
+#   -> tables -> Figure 2 (solid = familywise single-block p < .05).
+#   Results: PERMUTATIONS/single_block_null.csv, single_block_report.txt
+#
 # OUTPUT: everything the pipeline writes (results, logs, temp files and the
 # unzipped data) goes under $RUN_DIR, default /scratch/q55362cb/dsem_results/.
 # Nothing is written into the repo folder. Override with e.g.
@@ -223,7 +230,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   # --- preflight checks ---
   for f in fitVAR.R granger_analysis.R select_terms_for_individual_behaviours.R \
            final_term_weighting.R check_convergence.R make_figures.R granger_direction.R \
-           make_tables.R make_bridge.R permutation_null.R CDI_data.csv; do
+           make_tables.R make_bridge.R permutation_null.R single_block_test.R CDI_data.csv; do
     [[ -f "$REPO_DIR/$f" ]] || { echo "Missing $REPO_DIR/$f" >&2; exit 1; }
   done
   mkdir -p "$RUN_DIR" 2>/dev/null && [[ -w "$RUN_DIR" ]] \
@@ -314,6 +321,25 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     [[ "$WHAT" == submit ]] && tab_dep="--dependency=afterany:${JGD}:${J2B}"
     JT=$(submit_stage tables -J dsem_tables -t 0-1 --mem=8G $tab_dep -o "$LOG_DIR/tables.out")
     echo "Tables   (supplementary tables S1, S2):     job $JT"
+  fi
+
+  # ---- single-block permutation test (needs the bridge file) ----
+  if [[ "$WHAT" == single_block || "$WHAT" == sb_summary ]]; then
+    JSB=""
+    if [[ "$WHAT" == single_block ]]; then
+      [[ -s "$BRIDGE_FILE" ]] || { echo "Missing $BRIDGE_FILE: run the bridge stage first" >&2; exit 1; }
+      JSB=$(submit_stage sb_fit -J dsem_single_block -t 1-0 --mem=8G \
+              --array=0-"$PERM_N"%"$PERM_MAX_RUNNING" -o "$LOG_DIR/single_block_%a.out")
+      echo "Single-block test (observed + $PERM_N shuffles): job $JSB"
+    fi
+    sdep=""; [[ -n "$JSB" ]] && sdep="--dependency=afterany:$JSB"
+    JSS=$(submit_stage sb_summary -J dsem_sb_summary -t 0-1 --mem=8G $sdep -o "$LOG_DIR/single_block_summary.out")
+    echo "Single-block summary:                       job $JSS"
+    JT=$(submit_stage tables -J dsem_tables -t 0-1 --mem=8G --dependency=afterany:$JSS -o "$LOG_DIR/tables.out")
+    echo "Tables:                                     job $JT"
+    JF2=$(FIGURE=2 submit_stage figures -J dsem_figure2 -t 0-1 --mem=8G --dependency=afterok:$JSS \
+            -o "$LOG_DIR/figure2_perm.out")
+    echo "Figure 2:                                   job $JF2"
   fi
 
   # ---- permutation null for Step 2 (not part of the default submission) ----
@@ -488,6 +514,20 @@ perm2b)
     chains="$PERM_CHAINS" iter="$PERM_ITER"
   ;;
 
+sb_fit)
+  banner "single_block_test.R run $SLURM_ARRAY_TASK_ID (0 = observed)"
+  load_r; use_private_tmp
+  cd "$REPO_DIR"                 # script reads ./CDI_data.csv
+  Rscript "$REPO_DIR/single_block_test.R" fit "$RUN_DIR" "$SLURM_ARRAY_TASK_ID" \
+    perm_seed_base="$PERM_SEED_BASE" chains=4 iter=500
+  ;;
+
+sb_summary)
+  banner "single_block_test.R summary"
+  load_r
+  Rscript "$REPO_DIR/single_block_test.R" summary "$RUN_DIR"
+  ;;
+
 perm_summary)
   banner "permutation_null.R"
   load_r
@@ -505,7 +545,7 @@ step2b)
   ;;
 
 *)
-  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | granger_direction | step2a | step2b | figures | tables | permutations | bridge | perm2a | perm2b | perm_summary" >&2
+  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | granger_direction | step2a | step2b | figures | tables | permutations | bridge | perm2a | perm2b | perm_summary | single_block | sb_summary" >&2
   exit 1
   ;;
 esac

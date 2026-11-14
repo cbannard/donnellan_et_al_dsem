@@ -251,6 +251,17 @@ observed inclusion probabilities, the intercept-only model's weight and the
 best model's ELPD gain with their permutation distributions, including
 p-values corrected for looking at every block (`p_final_max`).
 
+**Single-block test** (`single_block_test.R`): asks, for each of the 90
+predictor blocks, whether that block alone predicts held-out vocabulary better
+than the intercept-only model (ELPD gain, leave-one-child-out), compared with
+the same statistic under the same vocabulary shuffles as the permutation runs.
+`p_single` compares a block with itself under shuffling; `p_single_max` with
+the best of all 90 blocks in each shuffle (familywise). Unlike the two-level
+inclusion probabilities, it does not depend on the block's group or on other
+blocks carrying the same information. Figure 2 uses it for its line style
+when present. Group-level evidence comes from `permutation_null.R`
+(`p_group`, `p_group_max` in Table S2).
+
 ```bash
 # Re-score Granger with clustered/block SEs (no Step 1 refit), then figures + tables
 bash run_dsem_pipeline.slurm granger          # then granger_combine, granger_direction
@@ -263,6 +274,8 @@ STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm step2b
 
 # Permutation null (same weights/blocks as the observed run)
 STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all PERM_N=100 bash run_dsem_pipeline.slurm permutations
+# Single-block test (after the bridge exists; same shuffles)
+PERM_N=100 bash run_dsem_pipeline.slurm single_block
 
 # Step 1 variants, each in its own run folder
 RUN_DIR=/scratch/q55362cb/dsem_session STEP1_SESSION=1 \

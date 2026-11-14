@@ -22,9 +22,11 @@
 #   inclusion probability (from final_term_weighting.R); the block's effect
 #   on log vocabulary (sum of the coefficients of its terms) averaged over
 #   the Step 2a models containing it — mean, 90% interval and P(> 0) — and
-#   the 90% interval of the fully model-averaged effect; and, if the
-#   permutation runs have been summarised (permutation_null.R), the
-#   permutation p-values. Effects need Step 2a output from the current
+#   the 90% interval of the fully model-averaged effect; and, when available,
+#   permutation results: the group's p (p_group, p_group_max; from
+#   permutation_null.R), the single-block test (single_elpd_gain, its SE,
+#   p_single, p_single_max; from single_block_test.R) and the two-level block
+#   p-values (p_inner, p_final, p_final_max). Effects need Step 2a output from the current
 #   select_terms_for_individual_behaviours.R ($block_effects).
 #   The weighting (pseudo-BMA+ or stacking) follows the Step 2b run.
 # =============================================================================
@@ -104,11 +106,26 @@ if (file.exists(s2b_file)) {
     names(eff)[names(eff) == "avg_q95"]   <- "model_averaged_q95"
     s2 <- merge(s2, eff, by = c("group", "block_label"), all.x = TRUE, sort = FALSE)
   }
+  pg <- file.path(run_dir, "PERMUTATIONS", "permutation_null_groups.csv")
+  if (file.exists(pg)) {
+    g <- read.csv(pg, stringsAsFactors = FALSE)
+    names(g)[names(g) == "p"] <- "p_group"; names(g)[names(g) == "p_max"] <- "p_group_max"
+    s2 <- merge(s2, g[, c("group", "p_group", "p_group_max")], by = "group", all.x = TRUE, sort = FALSE)
+    message("Table S2: group permutation p-values added from ", pg)
+  }
+  sb <- file.path(run_dir, "PERMUTATIONS", "single_block_null.csv")
+  if (file.exists(sb)) {
+    b <- read.csv(sb, stringsAsFactors = FALSE)
+    b <- b[, c("block", "elpd_gain", "elpd_gain_se", "p_single", "p_single_max")]
+    names(b)[2:3] <- c("single_elpd_gain", "single_elpd_gain_se")
+    s2 <- merge(s2, b, by = "block", all.x = TRUE, sort = FALSE)
+    message("Table S2: single-block test added from ", sb)
+  }
   pn <- file.path(run_dir, "PERMUTATIONS", "permutation_null_blocks.csv")
   if (file.exists(pn)) {
     p <- read.csv(pn, stringsAsFactors = FALSE)
     s2 <- merge(s2, p[, c("block", "p_inner", "p_final", "p_final_max")], by = "block", all.x = TRUE, sort = FALSE)
-    message("Table S2: permutation p-values added from ", pn)
+    message("Table S2: two-level permutation p-values added from ", pn)
   }
   s2$block_label <- NULL
   s2 <- s2[order(-s2$final_inclusion), ]

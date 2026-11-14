@@ -23,9 +23,11 @@
 #                         above it has a familywise permutation p < .05.
 #                    <number> — any other cut-off (the original paper used 1/3)
 #   perm=          Figure 2 line style from the permutation null (default auto:
-#                  used when PERMUTATIONS/permutation_null_blocks.csv exists):
-#                  solid = familywise permutation p (p_final_max) < alpha,
-#                  dashed = not; perm=0 draws all lines solid
+#                  used when permutation results exist): solid = significant,
+#                  dashed = not; perm=0 draws all lines solid. Uses the
+#                  single-block test (PERMUTATIONS/single_block_null.csv,
+#                  p_single_max < alpha) if present, otherwise the two-level
+#                  results (p_final_max and p_inner both < alpha)
 #   alpha=         significance level for perm (default 0.05)
 #   rule=          Figure 1 "positive relation" rule:
 #                    mean (default) — pooled mean lag coefficient > 0
@@ -311,13 +313,25 @@ if (!do_fig2) {
     message(sprintf("Permutation-calibrated threshold: %.3f", threshold))
   }
 
-  # Permutation p-values (familywise) for the line style.
-  use_perm <- perm_mode == "1" || (perm_mode == "auto" && file.exists(perm_blocks_csv))
-  if (use_perm && !file.exists(perm_blocks_csv)) stop("perm=1 needs ", perm_blocks_csv)
-  p_lookup <- if (use_perm) {
+  # Permutation p-values for the line style. Preferred: the single-block test
+  # (each block alone vs intercept-only; familywise p_single_max). Otherwise
+  # the two-level results, where a block counts only if BOTH its familywise
+  # final p and its within-group p are below alpha.
+  sb_csv   <- file.path(run_dir, "PERMUTATIONS", "single_block_null.csv")
+  have_any <- file.exists(sb_csv) || file.exists(perm_blocks_csv)
+  use_perm <- perm_mode == "1" || (perm_mode == "auto" && have_any)
+  if (use_perm && !have_any) stop("perm=1 needs ", sb_csv, " or ", perm_blocks_csv)
+  p_lookup <- NULL; perm_label <- ""
+  if (use_perm && file.exists(sb_csv)) {
+    sb <- read.csv(sb_csv, stringsAsFactors = FALSE)
+    p_lookup <- setNames(sb$p_single_max, sb$block)
+    perm_label <- "single-block, familywise"
+  } else if (use_perm) {
     pb <- read.csv(perm_blocks_csv, stringsAsFactors = FALSE)
-    setNames(pb$p_final_max, pb$block)
-  } else NULL
+    p_lookup <- setNames(pmax(pb$p_final_max, pb$p_inner), pb$block)
+    perm_label <- "final familywise and within-group"
+  }
+  if (use_perm) message("Figure 2 line style from permutation test: ", perm_label)
   block_key <- function(from, to) paste0(from, " -> ", to)
 
   edges <- blocks[blocks$weight >= threshold, ]
@@ -380,8 +394,8 @@ if (!do_fig2) {
     guides(linewidth = guide_legend(override.aes = list(colour = "grey35")))
   if (use_perm)
     p2 <- p2 + scale_linetype_manual(values = c(sig = "solid", ns = "22"), drop = FALSE,
-                                     name = "Permutation test",
-                                     labels = c(sig = sprintf("p < %.2f (familywise)", perm_alpha),
+                                     name = paste0("Permutation test\n(", perm_label, ")"),
+                                     labels = c(sig = sprintf("p < %.2f", perm_alpha),
                                                 ns = "not significant")) +
       guides(linetype = guide_legend(override.aes = list(colour = "grey35", linewidth = 0.9)))
   save_fig(p2, "figure2_vocabulary_network")
