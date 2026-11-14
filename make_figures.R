@@ -22,9 +22,10 @@
 #                         any block (needs permutation_null.R output). A block
 #                         above it has a familywise permutation p < .05.
 #                    <number> — any other cut-off (the original paper used 1/3)
-#   perm=          Figure 2 line style from the permutation null (default auto:
-#                  used when permutation results exist): solid = significant,
-#                  dashed = not; perm=0 draws all lines solid. Uses the
+#   perm=          Figure 2 line style from the permutation null. Default 0:
+#                  no significance marking, all lines solid. perm=1 (or auto:
+#                  when permutation results exist): solid = significant,
+#                  dashed = not. Uses the
 #                  single-block test (PERMUTATIONS/single_block_null.csv,
 #                  p_single_max < alpha) if present, otherwise the two-level
 #                  results (p_final_max and p_inner both < alpha)
@@ -41,8 +42,8 @@
 #                           the block, p_single)
 #                  With gain/perm, colour = sign of the block's effect in its
 #                  single-block model, a node ring = the mean rate (ring width
-#                  = its evidence), solid lines = p_single < alpha
-#                  (uncorrected), dashed = not.
+#                  = its evidence); with perm=1 also solid lines = p_single <
+#                  alpha (uncorrected), dashed = not.
 #   min_gain=      minimum ELPD gain for weight=gain|perm (default 0)
 #   rule=          Figure 1 "positive relation" rule:
 #                    mean (default) — pooled mean lag coefficient > 0
@@ -88,7 +89,7 @@ threshold <- if (thr_mode == "perm") NA_real_ else suppressWarnings(as.numeric(t
 if (thr_mode != "perm" && (is.na(threshold) || threshold < 0 || threshold > 1))
   stop("threshold= must be perm or a number between 0 and 1")
 perm_arg  <- sub("^perm=", "", keyed[grepl("^perm=", keyed)])
-perm_mode <- if (length(perm_arg)) tolower(perm_arg[length(perm_arg)]) else "auto"
+perm_mode <- if (length(perm_arg)) tolower(perm_arg[length(perm_arg)]) else "0"
 if (!perm_mode %in% c("auto", "0", "1")) stop("perm= must be auto, 0 or 1")
 w2_arg    <- sub("^weight=", "", keyed[grepl("^weight=", keyed)])
 fig2_weight <- if (length(w2_arg)) tolower(w2_arg[length(w2_arg)]) else "inclusion"
@@ -325,9 +326,8 @@ if (!do_fig2) {
     means <- data.frame(behaviour = sub("^mean ", "", sb$block[is_mean]), weight = sb$w[is_mean],
                         direction = sb$direction[is_mean], elpd_gain = sb$elpd_gain[is_mean],
                         p_single = sb$p_single[is_mean], stringsAsFactors = FALSE)
-    message(sprintf("Figure 2 (weight=%s): %d lag blocks and %d means with ELPD gain > %g; %d with p_single < %.2f",
-                    fig2_weight, nrow(edges), nrow(means), fig2_min_gain,
-                    sum(sb$sig == "sig"), perm_alpha))
+    message(sprintf("Figure 2 (weight=%s): %d lag blocks and %d means with ELPD gain > %g",
+                    fig2_weight, nrow(edges), nrow(means), fig2_min_gain))
     write.csv(rbind(
       data.frame(type = ifelse(edges$from == edges$to, "self-lag", "cross-lag"), from = edges$from, to = edges$to,
                  weight = edges$weight, elpd_gain = edges$elpd_gain, p_single = edges$p_single, direction = edges$direction),
@@ -340,21 +340,25 @@ if (!do_fig2) {
     lw_of <- function(w) 0.3 + 2.7 * w / wmax           # same mapping as the line-width scale
     cross <- edge_geometry(edges[edges$from != edges$to, ])
     loops <- loop_paths(edges[edges$from == edges$to, ])
-    edge_aes <- aes(x, y, xend = xend, yend = yend, colour = direction, linewidth = weight, linetype = sig)
-    loop_aes <- aes(px, py, group = from, colour = direction, linewidth = weight, linetype = sig)
+    mark_sig <- perm_mode %in% c("1", "auto")
+    edge_aes <- if (mark_sig) aes(x, y, xend = xend, yend = yend, colour = direction, linewidth = weight, linetype = sig) else
+      aes(x, y, xend = xend, yend = yend, colour = direction, linewidth = weight)
+    loop_aes <- if (mark_sig) aes(px, py, group = from, colour = direction, linewidth = weight, linetype = sig) else
+      aes(px, py, group = from, colour = direction, linewidth = weight)
+    lend <- if (mark_sig) "butt" else "round"
     p2 <- base_plot()
     if (!is.null(cross) && nrow(cross) > 0) {
       if (any(cross$bidirectional))
         p2 <- p2 + geom_curve(data = cross[cross$bidirectional, ], mapping = edge_aes,
-                              curvature = 0.25, arrow = arrow_spec, lineend = "butt", key_glyph = key_line)
+                              curvature = 0.25, arrow = arrow_spec, lineend = lend, key_glyph = key_line)
       if (any(!cross$bidirectional))
         p2 <- p2 + geom_segment(data = cross[!cross$bidirectional, ], mapping = edge_aes,
-                                arrow = arrow_spec, lineend = "butt", key_glyph = key_line)
+                                arrow = arrow_spec, lineend = lend, key_glyph = key_line)
     }
     if (!is.null(loops))
       p2 <- p2 + geom_path(data = loops, mapping = loop_aes,
                            arrow = arrow(length = unit(0.13, "inches"), type = "closed", angle = 22),
-                           lineend = "butt", key_glyph = key_line)
+                           lineend = lend, key_glyph = key_line)
     p2 <- add_nodes(p2, loop_nodes = edges$from[edges$from == edges$to])
     # Mean rates: a ring round the node, coloured by direction, width = evidence.
     dir_col <- c(positive = RED, negative = BLUE)
@@ -364,7 +368,7 @@ if (!do_fig2) {
       ring_df <- data.frame(cx = n$x + NODE_R * cos(a), cy = n$y + NODE_R * sin(a))
       p2 <- p2 + geom_polygon(data = ring_df, aes(cx, cy), fill = NA, colour = dir_col[[means$direction[i]]],
                               linewidth = lw_of(means$weight[i]),
-                              linetype = if (means$p_single[i] < perm_alpha) "solid" else "22")
+                              linetype = if (!mark_sig || means$p_single[i] < perm_alpha) "solid" else "22")
     }
     w_name <- if (fig2_weight == "gain") "ELPD gain\nover intercept-\nonly model" else "Evidence\n(-log10 p)"
     brks <- pretty(wlim, 3); brks <- brks[brks > 0 & brks <= wmax]
@@ -372,11 +376,13 @@ if (!do_fig2) {
       scale_colour_manual(values = dir_col, name = "Vocabulary",
                           labels = c(positive = "higher (positive)", negative = "lower (negative)"), drop = FALSE) +
       scale_linewidth(range = c(0.3, 3), limits = wlim, name = w_name, breaks = brks) +
-      scale_linetype_manual(values = c(sig = "solid", ns = "22"), drop = FALSE,
-                            name = "Permutation test\n(single block)",
-                            labels = c(sig = sprintf("p < %.2f (uncorrected)", perm_alpha), ns = "not significant")) +
-      guides(linewidth = guide_legend(override.aes = list(colour = "grey35")),
-             linetype  = guide_legend(override.aes = list(colour = "grey35", linewidth = 0.9)))
+      guides(linewidth = guide_legend(override.aes = list(colour = "grey35")))
+    if (mark_sig)
+      p2 <- p2 + scale_linetype_manual(values = c(sig = "solid", ns = "22"), drop = FALSE,
+                                       name = "Permutation test\n(single block)",
+                                       labels = c(sig = sprintf("p < %.2f (uncorrected)", perm_alpha),
+                                                  ns = "not significant")) +
+        guides(linetype = guide_legend(override.aes = list(colour = "grey35", linewidth = 0.9)))
     save_fig(p2, "figure2_vocabulary_network")
   } else {
   cf <- read.csv(coefs_csv, stringsAsFactors = FALSE)
