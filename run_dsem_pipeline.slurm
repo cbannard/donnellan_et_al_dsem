@@ -103,6 +103,13 @@
 #   Re-run only the summary
 #   with:  bash run_dsem_pipeline.slurm perm_summary
 #
+#   Group-level permutations only (Step 2b without Step 2a; about 1/5 of the
+#   cost). Gives the group and global p-values; block-level within-group and
+#   final p-values keep using the runs that also have Step 2a. E.g. to go
+#   from 100 to 1000 permutations:
+#     STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all PERM_START=101 PERM_N=1000 \
+#       bash run_dsem_pipeline.slurm perm_groups
+#
 #   Single-block test (each predictor block alone vs intercept-only, with the
 #   same shuffles; needs the bridge file, so run after/with permutations):
 #     bash run_dsem_pipeline.slurm single_block
@@ -354,6 +361,21 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     echo "Figure 2:                                   job $JF2"
   fi
 
+  # ---- group-level permutations: Step 2b only (no Step 2a) ----
+  if [[ "$WHAT" == perm_groups ]]; then
+    [[ "$STEP2B_BLOCKS" == all ]] || { echo "perm_groups needs STEP2B_BLOCKS=all" >&2; exit 1; }
+    [[ -s "$BRIDGE_FILE" ]] || { echo "Missing $BRIDGE_FILE: run the bridge stage first" >&2; exit 1; }
+    mkdir -p "$PERM_DIR"
+    JPG=$(submit_stage perm2b_only -J dsem_perm_groups -t "$TIME_LONG" --mem="$MEM_PERM" \
+            --array="$PERM_START"-"$PERM_N"%"$PERM_MAX_RUNNING" -o "$LOG_DIR/perm2b_only_%a.out")
+    echo "Perm 2b only (permutations $PERM_START-$PERM_N): job $JPG"
+    JPS=$(submit_stage perm_summary -J dsem_perm_summary -t 0-2 --mem=8G --dependency=afterany:$JPG \
+            -o "$LOG_DIR/perm_summary.out")
+    echo "Summary  (permutation p-values):            job $JPS"
+    JT=$(submit_stage tables -J dsem_tables -t 0-1 --mem=8G --dependency=afterany:$JPS -o "$LOG_DIR/tables.out")
+    echo "Tables:                                     job $JT"
+  fi
+
   # ---- permutation null for Step 2 (not part of the default submission) ----
   if [[ "$WHAT" == permutations || "$WHAT" == bridge || "$WHAT" == perm2a || "$WHAT" == perm2b \
         || "$WHAT" == perm_summary ]]; then
@@ -542,6 +564,19 @@ sb_summary)
   Rscript "$REPO_DIR/single_block_test.R" summary "$RUN_DIR"
   ;;
 
+perm2b_only)
+  k="$SLURM_ARRAY_TASK_ID"
+  pdir="$PERM_DIR/perm_$(printf '%03d' "$k")"
+  banner "Permutation $k, Step 2b only (group level)"
+  if [[ -s "$pdir/$STEP2B_PREFIX.rds" ]]; then echo "Exists, skipping: $pdir/$STEP2B_PREFIX.rds"; exit 0; fi
+  load_r; use_private_tmp
+  mkdir -p "$pdir"
+  cd "$REPO_DIR"
+  Rscript "$REPO_DIR/final_term_weighting.R" "$pdir" "$STEP1_DIR" "$STEP2B_PREFIX" \
+    bridge="$BRIDGE_FILE" permute_seed=$(( PERM_SEED_BASE + k )) seed=$(( PERM_SEED_BASE + 1000 * k )) \
+    blocks=all no_selection=1 weights="$STEP2_WEIGHTS" chains="$PERM_CHAINS" iter="$PERM_ITER"
+  ;;
+
 perm_summary)
   banner "permutation_null.R"
   load_r
@@ -559,7 +594,7 @@ step2b)
   ;;
 
 *)
-  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | granger_direction | step2a | step2b | figures | tables | permutations | bridge | perm2a | perm2b | perm_summary | single_block | sb_summary" >&2
+  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | granger_direction | step2a | step2b | figures | tables | permutations | bridge | perm2a | perm2b | perm_summary | single_block | sb_summary | perm_groups" >&2
   exit 1
   ;;
 esac

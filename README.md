@@ -274,6 +274,9 @@ STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm step2b
 
 # Permutation null (same weights/blocks as the observed run)
 STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all PERM_N=100 bash run_dsem_pipeline.slurm permutations
+# More permutations at group level only (Step 2b without Step 2a; ~1/5 of the cost):
+# group and global p-values use all runs, block-level ones only runs with Step 2a
+STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all PERM_START=101 PERM_N=1000 bash run_dsem_pipeline.slurm perm_groups
 # Single-block test (after the bridge exists; same shuffles)
 PERM_N=100 bash run_dsem_pipeline.slurm single_block
 

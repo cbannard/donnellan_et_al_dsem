@@ -65,6 +65,10 @@ read_run <- function(dir) {
     block = b$block[1], group = b$group[1], inner = max(b$inner_inclusion),
     outer = max(b$outer_inclusion), final = max(b$inclusion_weight),
     direction = b$effect_direction[which.max(b$inclusion_weight)], stringsAsFactors = FALSE)))
+  # Step 2b-only runs (no_selection=1) have no within-group weights: their
+  # block-level inner/final values are unavailable and only the group and
+  # global statistics are used from them.
+  if (isTRUE(r$no_selection)) { blocks$inner <- NA_real_; blocks$final <- NA_real_ }
   ss <- r$stacking_summary
   list(blocks = blocks,
        groups = data.frame(group = names(r$outer_inclusion), outer = as.numeric(r$outer_inclusion),
@@ -95,15 +99,18 @@ null_block <- function(blk, what) vapply(perms, function(p) {
   v <- p$blocks[[what]][p$blocks$block == blk]
   if (length(v)) v[1] else 0
 }, numeric(1))
-null_max_final <- vapply(perms, function(p) max(c(0, p$blocks$final)), numeric(1))
+null_max_final <- vapply(perms, function(p)
+  if (all(is.na(p$blocks$final))) NA_real_ else max(c(0, p$blocks$final), na.rm = TRUE), numeric(1))
+n_block_level <- sum(!is.na(null_max_final))
+q_na <- function(x, pr) if (all(is.na(x))) NA_real_ else unname(quantile(x, pr, na.rm = TRUE))
 
 ob <- obs$blocks
 blocks_out <- do.call(rbind, lapply(seq_len(nrow(ob)), function(j) {
   nb_in <- null_block(ob$block[j], "inner"); nb_fi <- null_block(ob$block[j], "final")
   data.frame(ob[j, c("block", "group", "direction")],
-             inner = ob$inner[j], inner_null_q95 = unname(quantile(nb_in, 0.95)), p_inner = p_ge(ob$inner[j], nb_in),
+             inner = ob$inner[j], inner_null_q95 = q_na(nb_in, 0.95), p_inner = p_ge(ob$inner[j], nb_in),
              outer = ob$outer[j],
-             final = ob$final[j], final_null_q95 = unname(quantile(nb_fi, 0.95)), p_final = p_ge(ob$final[j], nb_fi),
+             final = ob$final[j], final_null_q95 = q_na(nb_fi, 0.95), p_final = p_ge(ob$final[j], nb_fi),
              p_final_max = p_ge(ob$final[j], null_max_final),
              stringsAsFactors = FALSE, row.names = NULL)
 }))
@@ -121,10 +128,12 @@ groups_out <- groups_out[order(-groups_out$outer), ]
 
 null_int  <- vapply(perms, function(p) p$global[["intercept_weight"]], numeric(1))
 null_best <- vapply(perms, function(p) p$global[["best_elpd_diff"]], numeric(1))
-null_max_inner <- vapply(perms, function(p) max(c(0, p$blocks$inner)), numeric(1))
+null_max_inner <- vapply(perms, function(p)
+  if (all(is.na(p$blocks$inner))) NA_real_ else max(c(0, p$blocks$inner), na.rm = TRUE), numeric(1))
 g_row <- function(stat, obs_val, nv, lower_is_signal, note) data.frame(
   statistic = stat, observed = obs_val,
-  null_q05 = unname(quantile(nv, 0.05)), null_median = median(nv), null_q95 = unname(quantile(nv, 0.95)),
+  null_q05 = q_na(nv, 0.05), null_median = q_na(nv, 0.5), null_q95 = q_na(nv, 0.95),
+  n_perm = sum(!is.na(nv)),
   p = if (lower_is_signal) p_le(obs_val, nv) else p_ge(obs_val, nv), note = note,
   stringsAsFactors = FALSE, row.names = NULL)
 global_out <- rbind(
@@ -151,15 +160,17 @@ calib_txt <- sprintf(paste0(
   "Top observed block: %s (final inclusion %.3f); the largest block in a permutation run\n",
   "reached at least this in %.0f%% of runs (familywise p = %.3f).\n"),
   thr, sum(blocks_out$final > thr), top$block, top$final,
-  100 * mean(null_max_final >= top$final - 1e-12), top$p_final_max)
+  100 * mean(null_max_final >= top$final - 1e-12, na.rm = TRUE), top$p_final_max)
 
 fmt <- function(df) paste(capture.output(print(format(df, digits = 3), row.names = FALSE)), collapse = "\n")
 report <- paste0(
   "Permutation null for Step 2 (", n, " permutations; weights = ", obs$weight_mode,
   ", blocks = ", obs$block_mode, ")\n",
-  "Smallest attainable p-value with ", n, " permutations: ", signif(1 / (n + 1), 3), "\n\n",
+  "Smallest attainable p-value with ", n, " permutations: ", signif(1 / (n + 1), 3), "\n",
+  "Block-level statistics (inner, final) use the ", n_block_level, " runs with Step 2a;\n",
+  "group and global statistics use all ", n, " runs.\n\n",
   calib_txt, "\n",
-  "GLOBAL\n", fmt(global_out[, 1:6]), "\n\n",
+  "GLOBAL\n", fmt(global_out[, c("statistic", "observed", "null_q05", "null_median", "null_q95", "p", "n_perm")]), "\n\n",
   "BEHAVIOUR GROUPS (outer inclusion)\n", fmt(groups_out), "\n\n",
   "BLOCKS (top 20 by final inclusion)\n", fmt(head(blocks_out, 20)), "\n\n",
   "p_inner / p_final: vs the same block in the permutation runs;\n",

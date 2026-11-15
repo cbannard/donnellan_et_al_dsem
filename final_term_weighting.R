@@ -60,6 +60,12 @@
 #                                  [bridge=<file>] [permute_seed=<int>] [chains=4] [iter=500]
 #                                  [max_combos=<int>]
 #
+#   no_selection=1 (only with blocks=all): run without Step 2a output. Every
+#   block of every behaviour enters the outer search, as blocks=all does in
+#   practice, so the behaviour-group (outer) inclusion weights and the
+#   model-level results are the same as with Step 2a; inner weights are not
+#   available (set to 1, final = outer). Used for cheap group-level
+#   permutation runs.
 #   bridge=, permute_seed=, chains=, iter=, max_combos= as in
 #   select_terms_for_individual_behaviours.R (permute_seed must match the
 #   Step 2a runs whose selection files are in selection_folder).
@@ -110,6 +116,9 @@ permute_seed <- suppressWarnings(as.integer(keyed_arg(args, "permute_seed")))
 n_chains     <- as.integer(keyed_arg(args, "chains", 4))
 n_iter       <- as.integer(keyed_arg(args, "iter", 500))
 max_combos   <- suppressWarnings(as.integer(keyed_arg(args, "max_combos")))
+no_selection <- keyed_arg(args, "no_selection", "0") == "1"
+if (no_selection && block_mode != "all") stop("no_selection=1 needs blocks=all")
+if (no_selection) message("NO-SELECTION RUN: all blocks of all behaviours, no Step 2a inner weights")
 if (!is.na(permute_seed)) message("PERMUTATION RUN: vocabulary shuffled with permute_seed=", permute_seed)
 message("Weights: ", weight_mode)
 message("Block mode: ", block_mode, if (block_mode == "min") paste0(" (min_inner = ", min_inner, ")") else "")
@@ -277,12 +286,12 @@ extract_single_behaviour_record <- function(obj) {
   unname(rec_map)
 }
 
-selection_files <- list.files(
+selection_files <- if (no_selection) character(0) else list.files(
   selection_folder,
   pattern = "dsem_selection_.*single_behaviour\\.rds$",
   full.names = TRUE
 )
-if (length(selection_files) == 0) {
+if (length(selection_files) == 0 && !no_selection) {
   stop("No single-behaviour selection files found in: ", selection_folder)
 }
 message("Loading ", length(selection_files), " single-behaviour selection RDS files")
@@ -298,7 +307,10 @@ for (f in selection_files) {
   if (is.null(recs)) next
   for (r in recs) single_records[[r$behaviour]] <- r
 }
-if (length(single_records) == 0) {
+if (no_selection) {
+  # Placeholder records, filled in once the behaviours are known (below).
+  single_records <- NULL
+} else if (length(single_records) == 0) {
   stop("No valid {behaviour, selected_blocks} records found in selection RDS files")
 }
 
@@ -456,6 +468,17 @@ message("Outcome sample: N_out=", N_out)
 # selected_q_by_behaviour: all q_cols for blocks with inclusion_weight > 0.
 # inner_block_inclusion: keyed by behaviour, then by q_col, giving the
 #   within-behaviour stacking inclusion weight for that block.
+# no_selection=1: every block of every behaviour, inner weight 1.
+if (no_selection) {
+  single_records <- setNames(lapply(behaviours, function(b) list(
+    behaviour = b,
+    block_inclusion = data.frame(block_idx = seq_len(V + 1L),
+                                 block_label = c(paste0("Lags: ", behaviours), "Mean"),
+                                 inclusion_weight = 1, effect_direction = NA_character_,
+                                 stringsAsFactors = FALSE),
+    combo_summary = NULL, n_cc = NA_integer_)), behaviours)
+}
+
 selected_q_by_behaviour  <- list()
 inner_block_inclusion    <- list()  # behaviour -> named numeric vector (q_col -> inner weight)
 inner_block_direction    <- list()  # behaviour -> named character vector (q_col -> direction)
@@ -483,7 +506,7 @@ for (b in names(single_records)) {
   # weights=pseudobma: replace the Step 2a (stacking) inner weights with the
   # sum of Step 2a pseudo-BMA+ weights over the block combinations that
   # contain each block.
-  if (weight_mode == "pseudobma") {
+  if (weight_mode == "pseudobma" && !no_selection) {
     cs <- rec$combo_summary
     if (is.null(cs) || !"pseudobma_weight" %in% names(cs))
       stop("Selection file for '", b, "' has no per-combination pseudo-BMA+ weights")
@@ -962,6 +985,7 @@ saveRDS(
     block_mode              = block_mode,
     weight_mode             = weight_mode,
     permute_seed            = permute_seed,
+    no_selection            = no_selection,
     chains                  = n_chains,
     iter                    = n_iter,
     min_inner               = if (block_mode == "min") min_inner else NA_real_
