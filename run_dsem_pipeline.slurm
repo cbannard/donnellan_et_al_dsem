@@ -119,6 +119,10 @@
 #   e.g. STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all STEP2B_EXCLUDE=contingent.contingent \
 #          PERM_N=1000 bash run_dsem_pipeline.slurm perm_groups
 #
+#   Both group-level permutations and the single-block test in one go (the
+#   bridge file is made first if it does not exist; everything else waits):
+#     STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all PERM_N=1000 bash run_dsem_pipeline.slurm group_tests
+#
 #   Single-block test (each predictor block alone vs intercept-only, with the
 #   same shuffles; needs the bridge file, so run after/with permutations):
 #     bash run_dsem_pipeline.slurm single_block
@@ -358,12 +362,28 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     echo "Tables   (supplementary tables S1, S2):     job $JT"
   fi
 
+  # ---- bridge file for the permutation stages: made first if missing ----
+  # (bridge_dep echoes a --dependency flag on the bridge job, or nothing if
+  # bridge.rds already exists; the bridge job is submitted at most once.)
+  JB_AUTO=""
+  ensure_bridge() {
+    [[ -s "$BRIDGE_FILE" ]] && return 0
+    mkdir -p "$PERM_DIR"
+    if [[ -z "$JB_AUTO" ]]; then
+      JB_AUTO=$(submit_stage bridge -J dsem_bridge -t 0-6 $(mem_flag "$MEM_STEP2") -o "$LOG_DIR/bridge.out")
+      echo "Bridge   (Step 1 summaries; others wait for it): job $JB_AUTO"
+    fi
+  }
+  bridge_dep() { [[ -n "$JB_AUTO" ]] && echo "--dependency=afterok:$JB_AUTO"; }
+  if [[ "$WHAT" == group_tests || "$WHAT" == single_block || "$WHAT" == perm_groups ]]; then
+    ensure_bridge
+  fi
+
   # ---- single-block permutation test (needs the bridge file) ----
-  if [[ "$WHAT" == single_block || "$WHAT" == sb_summary ]]; then
+  if [[ "$WHAT" == single_block || "$WHAT" == sb_summary || "$WHAT" == group_tests ]]; then
     JSB=""
-    if [[ "$WHAT" == single_block ]]; then
-      [[ -s "$BRIDGE_FILE" ]] || { echo "Missing $BRIDGE_FILE: run the bridge stage first" >&2; exit 1; }
-      JSB=$(submit_stage sb_fit -J dsem_single_block -t 1-0 --mem=8G \
+    if [[ "$WHAT" == single_block || "$WHAT" == group_tests ]]; then
+      JSB=$(submit_stage sb_fit -J dsem_single_block -t 1-0 --mem=8G $(bridge_dep) \
               --array=$(( PERM_START == 1 ? 0 : PERM_START ))-"$PERM_N"%"$PERM_MAX_RUNNING" -o "$LOG_DIR/single_block_%a.out")
       echo "Single-block test (shuffles $PERM_START-$PERM_N$( (( PERM_START == 1 )) && echo ' + observed')): job $JSB"
     fi
@@ -378,16 +398,15 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
   fi
 
   # ---- group-level permutations: Step 2b only (no Step 2a) ----
-  if [[ "$WHAT" == perm_groups ]]; then
+  if [[ "$WHAT" == perm_groups || "$WHAT" == group_tests ]]; then
     [[ "$STEP2B_BLOCKS" == all ]] || { echo "perm_groups needs STEP2B_BLOCKS=all" >&2; exit 1; }
-    [[ -s "$BRIDGE_FILE" ]] || { echo "Missing $BRIDGE_FILE: run the bridge stage first" >&2; exit 1; }
     mkdir -p "$PERM_DIR"
     first=$PERM_START
     # A variant (STEP2B_GROUPING=source or STEP2B_EXCLUDE) also needs its observed run (task 0).
     [[ -n "$VARIANT_TAG" && "$PERM_START" == 1 ]] && first=0
-    JPG=$(submit_stage perm2b_only -J dsem_perm_groups -t "$TIME_LONG" --mem="$MEM_PERM" \
+    JPG=$(submit_stage perm2b_only -J dsem_perm_groups -t "$TIME_LONG" --mem="$MEM_PERM" $(bridge_dep) \
             --array="$first"-"$PERM_N"%"$PERM_MAX_RUNNING" -o "$LOG_DIR/perm2b_only${VARIANT_TAG:+_$VARIANT_TAG}_%a.out")
-    echo "Perm 2b only${VARIANT_TAG:+ [$VARIANT_TAG]} (runs $first-$PERM_N; 0 = observed): job $JPG"
+    echo "Perm 2b only${VARIANT_TAG:+ [$VARIANT_TAG]} (runs $first-$PERM_N${VARIANT_TAG:+; 0 = observed}): job $JPG"
     JPS=$(submit_stage perm_summary -J dsem_perm_summary -t 0-2 --mem=8G --dependency=afterany:$JPG \
             -o "$LOG_DIR/perm_summary${VARIANT_TAG:+_$VARIANT_TAG}.out")
     echo "Summary  (permutation p-values):            job $JPS"
@@ -620,7 +639,7 @@ step2b)
   ;;
 
 *)
-  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | granger_direction | step2a | step2b | figures | tables | permutations | bridge | perm2a | perm2b | perm_summary | single_block | sb_summary | perm_groups" >&2
+  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | granger_direction | step2a | step2b | figures | tables | permutations | bridge | perm2a | perm2b | perm_summary | single_block | sb_summary | perm_groups | group_tests" >&2
   exit 1
   ;;
 esac
