@@ -34,7 +34,14 @@
 #         null_q95 — 95th percentile of the same block's gain under shuffling;
 #         p_single — share of shuffles where this block's gain >= observed;
 #         p_single_max — share of shuffles where the LARGEST gain of any of the
-#           90 blocks >= observed (familywise: corrects for testing 90 blocks).
+#           90 blocks >= observed (familywise: corrects for testing 90 blocks);
+#         q_single — permutation false discovery rate: if this block and every
+#           block with a larger gain were declared real, the expected share of
+#           them that would be chance findings (average number of shuffled
+#           blocks with a gain at least this large / number of observed ones),
+#           made monotone (Storey & Tibshirani, 2003).
+#       The report also compares the number of blocks with a positive gain and
+#       the sum of positive gains with their permutation distributions.
 #
 # Needs: <run_dir>/PERMUTATIONS/bridge.rds (make_bridge.R) and ./CDI_data.csv
 # =============================================================================
@@ -187,7 +194,15 @@ if (mode == "summary") {
   out$p_single <- vapply(seq_len(nrow(out)), function(j) p_ge(out$elpd_gain[j], null_mat[j, ]), numeric(1))
   out$p_single_max <- vapply(out$elpd_gain, p_ge, numeric(1), nv = null_max)
   out <- out[order(-out$elpd_gain), ]
+  # Permutation FDR / q-values over the ranking by gain.
+  null_exceed <- vapply(out$elpd_gain, function(g) mean(colSums(null_mat >= g - 1e-12, na.rm = TRUE)), numeric(1))
+  fdr <- pmin(1, null_exceed / seq_len(nrow(out)))
+  out$q_single <- rev(cummin(rev(fdr)))
   write.csv(out, file.path(run_dir, "PERMUTATIONS", "single_block_null.csv"), row.names = FALSE)
+  n_pos <- sum(out$elpd_gain > 0, na.rm = TRUE)
+  null_pos <- colSums(null_mat > 0, na.rm = TRUE)
+  sum_pos <- sum(pmax(out$elpd_gain, 0), na.rm = TRUE)
+  null_sum <- colSums(pmax(null_mat, 0), na.rm = TRUE)
 
   thr <- unname(quantile(null_max, 0.95))
   fmt <- function(df) paste(capture.output(print(format(df, digits = 3), row.names = FALSE)), collapse = "\n")
@@ -196,14 +211,20 @@ if (mode == "summary") {
     n, " shuffles of vocabulary; smallest attainable p = ", signif(1 / (n + 1), 3), "\n\n",
     sprintf("Familywise threshold (95th percentile of the largest gain of any block per shuffle): %.2f\n", thr),
     sprintf("Blocks above it (p_single_max < .05): %d\n", sum(out$p_single_max < 0.05)),
-    sprintf("Blocks with p_single < .05 (uncorrected): %d (about %.1f expected by chance)\n\n",
+    sprintf("Blocks with p_single < .05 (uncorrected): %d (about %.1f expected by chance)\n",
             sum(out$p_single < 0.05), 0.05 * nrow(out)),
+    sprintf("Blocks with a positive gain: %d (shuffles: median %.0f, 95th percentile %.0f; p = %.3f)\n",
+            n_pos, median(null_pos), quantile(null_pos, 0.95), p_ge(n_pos, null_pos)),
+    sprintf("Sum of positive gains: %.2f (shuffles: median %.2f, 95th percentile %.2f; p = %.3f)\n",
+            sum_pos, median(null_sum), quantile(null_sum, 0.95), p_ge(sum_pos, null_sum)),
+    sprintf("Blocks with q_single < .25 / < .5: %d / %d\n\n", sum(out$q_single < 0.25), sum(out$q_single < 0.5)),
     "TOP 25 BLOCKS\n",
     fmt(head(out[, c("block", "elpd_gain", "elpd_gain_se", "effect_mean", "effect_q05", "effect_q95",
-                     "null_q95", "p_single", "p_single_max")], 25)), "\n\n",
+                     "null_q95", "p_single", "p_single_max", "q_single")], 25)), "\n\n",
     "elpd_gain: ELPD(block alone) - ELPD(intercept only); positive = better held-out prediction.\n",
     "effect_*: block effect on log vocabulary (sum of its coefficients) in the single-block model.\n",
-    "p_single: vs the same block under shuffling; p_single_max: vs the best of all 90 blocks per shuffle.\n")
+    "p_single: vs the same block under shuffling; p_single_max: vs the best of all 90 blocks per shuffle;\n",
+    "q_single: expected share of chance findings among this block and all blocks ranked above it.\n")
   writeLines(rep, file.path(run_dir, "PERMUTATIONS", "single_block_report.txt"))
   cat(rep)
   quit(save = "no")

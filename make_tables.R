@@ -116,7 +116,10 @@ if (file.exists(s2b_file)) {
   sb <- file.path(run_dir, "PERMUTATIONS", "single_block_null.csv")
   if (file.exists(sb)) {
     b <- read.csv(sb, stringsAsFactors = FALSE)
-    b <- b[, c("block", "elpd_gain", "elpd_gain_se", "p_single", "p_single_max")]
+    b <- b[, intersect(c("block", "elpd_gain", "elpd_gain_se", "effect_mean", "effect_q05", "effect_q95",
+                         "p_single", "p_single_max", "q_single"), names(b))]
+    names(b)[names(b) %in% c("effect_mean", "effect_q05", "effect_q95")] <-
+      paste0("single_", names(b)[names(b) %in% c("effect_mean", "effect_q05", "effect_q95")])
     names(b)[2:3] <- c("single_elpd_gain", "single_elpd_gain_se")
     s2 <- merge(s2, b, by = "block", all.x = TRUE, sort = FALSE)
     message("Table S2: single-block test added from ", sb)
