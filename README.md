@@ -277,6 +277,12 @@ STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all PERM_N=100 bash run_dsem_pipeline.slur
 # More permutations at group level only (Step 2b without Step 2a; ~1/5 of the cost):
 # group and global p-values use all runs, block-level ones only runs with Step 2a
 STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all PERM_START=101 PERM_N=1000 bash run_dsem_pipeline.slurm perm_groups
+# Group-level variants (observed run + shuffles, Step 2b only; results in
+# PERMUTATIONS/permutation_null_<tag>_*):
+#   contingent-talk group without its self-lag
+STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all STEP2B_EXCLUDE=contingent.contingent PERM_N=1000 bash run_dsem_pipeline.slurm perm_groups
+#   groups defined by the PREDICTING behaviour (what each behaviour is followed by)
+STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all STEP2B_GROUPING=source PERM_N=1000 bash run_dsem_pipeline.slurm perm_groups
 # Single-block test (after the bridge exists; same shuffles)
 PERM_N=100 bash run_dsem_pipeline.slurm single_block
 

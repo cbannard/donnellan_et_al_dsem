@@ -45,6 +45,10 @@ if (length(args) < 1) stop("Usage: Rscript permutation_null.R <run_dir> [prefix]
 run_dir <- args[1]
 prefix  <- if (length(args) >= 2) args[2] else "dsem_selection_from_single_behaviour_sets"
 obs_dir  <- file.path(run_dir, "MODELS-STEP1")
+# Variant analyses (other Step 2b prefixes) get their own output files.
+tag <- sub("^dsem_selection_from_single_behaviour_sets_?", "", prefix)
+out_name <- function(stem, ext) file.path(file.path(run_dir, "PERMUTATIONS"),
+  paste0("permutation_null", if (nzchar(tag)) paste0("_", tag) else "", "_", stem, ".", ext))
 perm_dir <- file.path(run_dir, "PERMUTATIONS")
 
 # One Step 2b result -> list(blocks, groups, global)
@@ -148,13 +152,14 @@ global_out <- rbind(
   g_row("max_group_inclusion", max(c(0, obs$groups$outer)), null_max_outer, FALSE,
         "largest group (outer) inclusion"))
 
-write.csv(blocks_out, file.path(perm_dir, "permutation_null_blocks.csv"), row.names = FALSE)
-write.csv(groups_out, file.path(perm_dir, "permutation_null_groups.csv"), row.names = FALSE)
-write.csv(global_out, file.path(perm_dir, "permutation_null_global.csv"), row.names = FALSE)
+write.csv(blocks_out, out_name("blocks", "csv"), row.names = FALSE)
+write.csv(groups_out, out_name("groups", "csv"), row.names = FALSE)
+write.csv(global_out, out_name("global", "csv"), row.names = FALSE)
 
 thr <- global_out$null_q95[global_out$statistic == "max_final_inclusion"]
+block_level <- is.finite(thr) && any(is.finite(blocks_out$final))
 top <- blocks_out[1, ]
-calib_txt <- sprintf(paste0(
+calib_txt <- if (!block_level) "Block-level statistics are not available for this run (Step 2b only, no Step 2a).\n" else sprintf(paste0(
   "Permutation-calibrated threshold for final inclusion (95th percentile of the largest final\n",
   "inclusion in each permutation run): %.3f. Blocks above it: %d.\n",
   "Top observed block: %s (final inclusion %.3f); the largest block in a permutation run\n",
@@ -164,7 +169,7 @@ calib_txt <- sprintf(paste0(
 
 fmt <- function(df) paste(capture.output(print(format(df, digits = 3), row.names = FALSE)), collapse = "\n")
 report <- paste0(
-  "Permutation null for Step 2 (", n, " permutations; weights = ", obs$weight_mode,
+  "Permutation null for Step 2", if (nzchar(tag)) paste0(" [", tag, "]") else "", " (", n, " permutations; weights = ", obs$weight_mode,
   ", blocks = ", obs$block_mode, ")\n",
   "Smallest attainable p-value with ", n, " permutations: ", signif(1 / (n + 1), 3), "\n",
   "Block-level statistics (inner, final) use the ", n_block_level, " runs with Step 2a;\n",
@@ -176,5 +181,5 @@ report <- paste0(
   "p_inner / p_final: vs the same block in the permutation runs;\n",
   "p_final_max: vs the largest final inclusion of any block in each run (corrects for all blocks);\n",
   "p_max (groups): vs the largest group inclusion in each run.\n")
-writeLines(report, file.path(perm_dir, "permutation_null_report.txt"))
+writeLines(report, out_name("report", "txt"))
 cat(report)

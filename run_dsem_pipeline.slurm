@@ -110,6 +110,15 @@
 #     STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all PERM_START=101 PERM_N=1000 \
 #       bash run_dsem_pipeline.slurm perm_groups
 #
+#   Variants of the group-level test (each with its own observed run, task 0,
+#   and output files tagged in PERMUTATIONS/permutation_null_<tag>_*):
+#     STEP2B_GROUPING=source   group blocks by the PREDICTING behaviour (how a
+#                              behaviour organises what follows it)
+#     STEP2B_EXCLUDE=contingent.contingent   leave a block out (here the
+#                              contingent-talk self-lag)
+#   e.g. STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all STEP2B_EXCLUDE=contingent.contingent \
+#          PERM_N=1000 bash run_dsem_pipeline.slurm perm_groups
+#
 #   Single-block test (each predictor block alone vs intercept-only, with the
 #   same shuffles; needs the bridge file, so run after/with permutations):
 #     bash run_dsem_pipeline.slurm single_block
@@ -175,6 +184,8 @@ STEP1_LAG_STEP="${STEP1_LAG_STEP:-1}"
 GRANGER_BLOCK_ROWS="${GRANGER_BLOCK_ROWS:-20}"  # rows per block for the block SE
 PERM_N="${PERM_N:-100}"              # permutation null: run permutations PERM_START..PERM_N
 PERM_START="${PERM_START:-1}"        #   (e.g. PERM_START=101 PERM_N=1000 adds 900 to an existing 100)
+STEP2B_GROUPING="${STEP2B_GROUPING:-target}" # perm_groups variants: target | source grouping
+STEP2B_EXCLUDE="${STEP2B_EXCLUDE:-}"         #   blocks left out, e.g. contingent.contingent
 PERM_CHAINS="${PERM_CHAINS:-2}"      #   MCMC chains per Step 2 model in permutation runs
 PERM_ITER="${PERM_ITER:-500}"        #   warm-up (= sampling) iterations per chain
 PERM_MAX_RUNNING="${PERM_MAX_RUNNING:-100}"  # max permutation tasks running at once
@@ -185,8 +196,13 @@ STEP2_SEED="${STEP2_SEED:-}"         # blank = each Step 2 job draws a random se
                                       #   set a number to reproduce an earlier run
 
 BEHAVIOURS=(contingent gaze CV non_CV index_point open_point give show other_gesture)
+# Variant group-level analyses write under their own Step 2b prefix.
+VARIANT_TAG=""
+[[ "${STEP2B_GROUPING:-target}" == source ]] && VARIANT_TAG="src"
+[[ -n "${STEP2B_EXCLUDE:-}" ]] && VARIANT_TAG="${VARIANT_TAG:+${VARIANT_TAG}_}excl_${STEP2B_EXCLUDE//[.,]/_}"
 GRANGER_PREFIX="granger_loocv"
 STEP2B_PREFIX="dsem_selection_from_single_behaviour_sets"
+VARIANT_PREFIX="${STEP2B_PREFIX}${VARIANT_TAG:+_$VARIANT_TAG}"
 # -----------------------------------------------------------------------------
 
 set -eo pipefail
@@ -228,7 +244,7 @@ banner() {
 submit_stage() {
   local stage="$1"; shift
   sbatch --parsable -p "$PARTITION" -n 1 \
-    --export=ALL,STAGE="$stage",REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR",STEP2_SEED="$STEP2_SEED",FIGURE="$FIGURE",FIG1_RULE="$FIG1_RULE",FIG1_PROB="$FIG1_PROB",FIG1_Z="$FIG1_Z",FIG2_THRESHOLD="$FIG2_THRESHOLD",FIG2_WEIGHT="$FIG2_WEIGHT",FIG2_MIN_GAIN="$FIG2_MIN_GAIN",FIG1_SHOW="$FIG1_SHOW",STEP2B_BLOCKS="$STEP2B_BLOCKS",STEP2B_MIN_INNER="$STEP2B_MIN_INNER",STEP2_WEIGHTS="$STEP2_WEIGHTS",STEP1_SESSION="$STEP1_SESSION",STEP1_ONSET="$STEP1_ONSET",STEP1_LAG_STEP="$STEP1_LAG_STEP",GRANGER_BLOCK_ROWS="$GRANGER_BLOCK_ROWS",PERM_N="$PERM_N",PERM_START="$PERM_START",PERM_CHAINS="$PERM_CHAINS",PERM_ITER="$PERM_ITER",PERM_SEED_BASE="$PERM_SEED_BASE" \
+    --export=ALL,STAGE="$stage",REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR",STEP2_SEED="$STEP2_SEED",FIGURE="$FIGURE",FIG1_RULE="$FIG1_RULE",FIG1_PROB="$FIG1_PROB",FIG1_Z="$FIG1_Z",FIG2_THRESHOLD="$FIG2_THRESHOLD",FIG2_WEIGHT="$FIG2_WEIGHT",FIG2_MIN_GAIN="$FIG2_MIN_GAIN",FIG1_SHOW="$FIG1_SHOW",STEP2B_BLOCKS="$STEP2B_BLOCKS",STEP2B_MIN_INNER="$STEP2B_MIN_INNER",STEP2_WEIGHTS="$STEP2_WEIGHTS",STEP1_SESSION="$STEP1_SESSION",STEP1_ONSET="$STEP1_ONSET",STEP1_LAG_STEP="$STEP1_LAG_STEP",GRANGER_BLOCK_ROWS="$GRANGER_BLOCK_ROWS",PERM_N="$PERM_N",PERM_START="$PERM_START",STEP2B_GROUPING="$STEP2B_GROUPING",STEP2B_EXCLUDE="$STEP2B_EXCLUDE",PERM_CHAINS="$PERM_CHAINS",PERM_ITER="$PERM_ITER",PERM_SEED_BASE="$PERM_SEED_BASE" \
     "$@" "$SELF"
 }
 
@@ -366,14 +382,19 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     [[ "$STEP2B_BLOCKS" == all ]] || { echo "perm_groups needs STEP2B_BLOCKS=all" >&2; exit 1; }
     [[ -s "$BRIDGE_FILE" ]] || { echo "Missing $BRIDGE_FILE: run the bridge stage first" >&2; exit 1; }
     mkdir -p "$PERM_DIR"
+    first=$PERM_START
+    # A variant (STEP2B_GROUPING=source or STEP2B_EXCLUDE) also needs its observed run (task 0).
+    [[ -n "$VARIANT_TAG" && "$PERM_START" == 1 ]] && first=0
     JPG=$(submit_stage perm2b_only -J dsem_perm_groups -t "$TIME_LONG" --mem="$MEM_PERM" \
-            --array="$PERM_START"-"$PERM_N"%"$PERM_MAX_RUNNING" -o "$LOG_DIR/perm2b_only_%a.out")
-    echo "Perm 2b only (permutations $PERM_START-$PERM_N): job $JPG"
+            --array="$first"-"$PERM_N"%"$PERM_MAX_RUNNING" -o "$LOG_DIR/perm2b_only${VARIANT_TAG:+_$VARIANT_TAG}_%a.out")
+    echo "Perm 2b only${VARIANT_TAG:+ [$VARIANT_TAG]} (runs $first-$PERM_N; 0 = observed): job $JPG"
     JPS=$(submit_stage perm_summary -J dsem_perm_summary -t 0-2 --mem=8G --dependency=afterany:$JPG \
-            -o "$LOG_DIR/perm_summary.out")
+            -o "$LOG_DIR/perm_summary${VARIANT_TAG:+_$VARIANT_TAG}.out")
     echo "Summary  (permutation p-values):            job $JPS"
-    JT=$(submit_stage tables -J dsem_tables -t 0-1 --mem=8G --dependency=afterany:$JPS -o "$LOG_DIR/tables.out")
-    echo "Tables:                                     job $JT"
+    if [[ -z "$VARIANT_TAG" ]]; then
+      JT=$(submit_stage tables -J dsem_tables -t 0-1 --mem=8G --dependency=afterany:$JPS -o "$LOG_DIR/tables.out")
+      echo "Tables:                                     job $JT"
+    fi
   fi
 
   # ---- permutation null for Step 2 (not part of the default submission) ----
@@ -566,21 +587,26 @@ sb_summary)
 
 perm2b_only)
   k="$SLURM_ARRAY_TASK_ID"
-  pdir="$PERM_DIR/perm_$(printf '%03d' "$k")"
-  banner "Permutation $k, Step 2b only (group level)"
-  if [[ -s "$pdir/$STEP2B_PREFIX.rds" ]]; then echo "Exists, skipping: $pdir/$STEP2B_PREFIX.rds"; exit 0; fi
+  if [[ "$k" == 0 ]]; then
+    pdir="$STEP1_DIR"; perm_args=""; chains_k=4      # observed data, as many chains as Step 2b
+  else
+    pdir="$PERM_DIR/perm_$(printf '%03d' "$k")"; perm_args="permute_seed=$(( PERM_SEED_BASE + k ))"; chains_k="$PERM_CHAINS"
+  fi
+  banner "Run $k (0 = observed), Step 2b only (group level)${VARIANT_TAG:+ [$VARIANT_TAG]}"
+  if [[ -s "$pdir/$VARIANT_PREFIX.rds" ]]; then echo "Exists, skipping: $pdir/$VARIANT_PREFIX.rds"; exit 0; fi
   load_r; use_private_tmp
   mkdir -p "$pdir"
   cd "$REPO_DIR"
-  Rscript "$REPO_DIR/final_term_weighting.R" "$pdir" "$STEP1_DIR" "$STEP2B_PREFIX" \
-    bridge="$BRIDGE_FILE" permute_seed=$(( PERM_SEED_BASE + k )) seed=$(( PERM_SEED_BASE + 1000 * k )) \
-    blocks=all no_selection=1 weights="$STEP2_WEIGHTS" chains="$PERM_CHAINS" iter="$PERM_ITER"
+  Rscript "$REPO_DIR/final_term_weighting.R" "$pdir" "$STEP1_DIR" "$VARIANT_PREFIX" \
+    bridge="$BRIDGE_FILE" $perm_args seed=$(( PERM_SEED_BASE + 1000 * k )) \
+    blocks=all no_selection=1 weights="$STEP2_WEIGHTS" chains="$chains_k" iter="$PERM_ITER" \
+    grouping="$STEP2B_GROUPING" ${STEP2B_EXCLUDE:+exclude=$STEP2B_EXCLUDE}
   ;;
 
 perm_summary)
   banner "permutation_null.R"
   load_r
-  Rscript "$REPO_DIR/permutation_null.R" "$RUN_DIR" "$STEP2B_PREFIX"
+  Rscript "$REPO_DIR/permutation_null.R" "$RUN_DIR" "$VARIANT_PREFIX"
   ;;
 
 step2b)

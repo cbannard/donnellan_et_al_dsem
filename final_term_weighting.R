@@ -66,6 +66,15 @@
 #   model-level results are the same as with Step 2a; inner weights are not
 #   available (set to 1, final = outer). Used for cheap group-level
 #   permutation runs.
+#   grouping=target|source (with no_selection=1): how predictor blocks are
+#   grouped for the outer search. target (default): by the behaviour being
+#   predicted (all relations INTO y, y's self-lag and y's mean rate) - the
+#   behaviour's temporal organisation. source: by the predicting behaviour
+#   (all relations FROM x, x's self-lag and x's mean rate) - how a behaviour
+#   organises what follows it.
+#   exclude=x.y[,x.y...] (with no_selection=1): leave lag block x -> y out of
+#   every model (mean.y for y's mean rate), e.g. exclude=contingent.contingent
+#   to test the contingent-talk group without its self-lag.
 #   bridge=, permute_seed=, chains=, iter=, max_combos= as in
 #   select_terms_for_individual_behaviours.R (permute_seed must match the
 #   Step 2a runs whose selection files are in selection_folder).
@@ -117,6 +126,12 @@ n_chains     <- as.integer(keyed_arg(args, "chains", 4))
 n_iter       <- as.integer(keyed_arg(args, "iter", 500))
 max_combos   <- suppressWarnings(as.integer(keyed_arg(args, "max_combos")))
 no_selection <- keyed_arg(args, "no_selection", "0") == "1"
+grouping     <- tolower(keyed_arg(args, "grouping", "target"))
+if (!grouping %in% c("target", "source")) stop("grouping= must be target or source")
+exclude_arg  <- keyed_arg(args, "exclude", "")
+exclude      <- if (nzchar(exclude_arg)) strsplit(exclude_arg, ",", fixed = TRUE)[[1]] else character(0)
+if ((grouping != "target" || length(exclude)) && !no_selection)
+  stop("grouping=source and exclude= need no_selection=1")
 if (no_selection && block_mode != "all") stop("no_selection=1 needs blocks=all")
 if (no_selection) message("NO-SELECTION RUN: all blocks of all behaviours, no Step 2a inner weights")
 if (!is.na(permute_seed)) message("PERMUTATION RUN: vocabulary shuffled with permute_seed=", permute_seed)
@@ -581,6 +596,35 @@ for (b in names(single_records)) {
   inner_block_direction[[b]] <- dir_vec
 }
 
+# grouping=source: regroup every block by the PREDICTING behaviour.
+q_of_block <- function(x, y) {           # all lag q-columns of block x -> y
+  xi <- match(x, behaviours); yi <- match(y, behaviours)
+  if (is.na(xi) || is.na(yi)) stop("Unknown behaviour in block ", x, " -> ", y)
+  ks <- (xi - 1L) * K_per_pair + seq_len(K_per_pair)
+  as.integer((ks - 1L) * V + yi)
+}
+if (no_selection && grouping == "source") {
+  selected_q_by_behaviour <- setNames(lapply(behaviours, function(x)
+    c(unlist(lapply(behaviours, function(y) q_of_block(x, y))), as.integer(V * K + match(x, behaviours)))),
+    behaviours)
+  message("Grouping by SOURCE behaviour: each group = all relations from x, plus x's mean rate")
+}
+if (length(exclude)) {
+  drop_q <- unlist(lapply(exclude, function(e) {
+    parts <- strsplit(e, ".", fixed = TRUE)[[1]]
+    if (length(parts) != 2) stop("exclude= entries must look like x.y or mean.y: ", e)
+    if (parts[1] == "mean") as.integer(V * K + match(parts[2], behaviours)) else q_of_block(parts[1], parts[2])
+  }))
+  if (any(is.na(drop_q))) stop("Unknown behaviour in exclude=", exclude_arg)
+  selected_q_by_behaviour <- lapply(selected_q_by_behaviour, function(qs) setdiff(qs, drop_q))
+  message("Excluded from every model: ", paste(exclude, collapse = ", "), " (", length(drop_q), " terms)")
+}
+if (no_selection) {   # inner weights are not available: 1 for every kept term
+  inner_block_inclusion <- lapply(selected_q_by_behaviour, function(qs) setNames(rep(1, length(qs)), as.character(qs)))
+  inner_block_direction <- lapply(selected_q_by_behaviour, function(qs) setNames(rep(NA_character_, length(qs)), as.character(qs)))
+}
+message("Terms per group: ", paste(sprintf("%s %d", names(selected_q_by_behaviour),
+                                           lengths(selected_q_by_behaviour)), collapse = ", "))
 selected_q_by_behaviour <- selected_q_by_behaviour[lengths(selected_q_by_behaviour) > 0]
 if (length(selected_q_by_behaviour) == 0) {
   stop("No behaviour has any block meeting the selection rule (blocks=", block_mode,
@@ -986,6 +1030,8 @@ saveRDS(
     weight_mode             = weight_mode,
     permute_seed            = permute_seed,
     no_selection            = no_selection,
+    grouping                = grouping,
+    exclude                 = exclude,
     chains                  = n_chains,
     iter                    = n_iter,
     min_inner               = if (block_mode == "min") min_inner else NA_real_
