@@ -96,7 +96,11 @@
 #   and PERM_ITER (500) per model, PERM_MAX_RUNNING (100 tasks at once),
 #   PERM_SEED_BASE. Each permutation costs roughly 9 x 2-3 h + 3-4 h of CPU;
 #   finished permutations are skipped on resubmission, so it can be run in
-#   batches (e.g. PERM_N=20 first, later PERM_N=100). Re-run only the summary
+#   batches (e.g. PERM_N=20 first, later PERM_N=100); to add permutations to an
+#   existing set without queuing the finished ones, set PERM_START, e.g.
+#   PERM_START=101 PERM_N=1000. Slurm limits array size (scontrol show config |
+#   grep MaxArraySize); split big batches with PERM_START/PERM_N if needed.
+#   Re-run only the summary
 #   with:  bash run_dsem_pipeline.slurm perm_summary
 #
 #   Single-block test (each predictor block alone vs intercept-only, with the
@@ -162,7 +166,8 @@ STEP1_SESSION="${STEP1_SESSION:-0}"  # Step 1 options (fitVAR.R); defaults = rep
 STEP1_ONSET="${STEP1_ONSET:-0}"
 STEP1_LAG_STEP="${STEP1_LAG_STEP:-1}"
 GRANGER_BLOCK_ROWS="${GRANGER_BLOCK_ROWS:-20}"  # rows per block for the block SE
-PERM_N="${PERM_N:-100}"              # permutation null: number of permutations
+PERM_N="${PERM_N:-100}"              # permutation null: run permutations PERM_START..PERM_N
+PERM_START="${PERM_START:-1}"        #   (e.g. PERM_START=101 PERM_N=1000 adds 900 to an existing 100)
 PERM_CHAINS="${PERM_CHAINS:-2}"      #   MCMC chains per Step 2 model in permutation runs
 PERM_ITER="${PERM_ITER:-500}"        #   warm-up (= sampling) iterations per chain
 PERM_MAX_RUNNING="${PERM_MAX_RUNNING:-100}"  # max permutation tasks running at once
@@ -216,7 +221,7 @@ banner() {
 submit_stage() {
   local stage="$1"; shift
   sbatch --parsable -p "$PARTITION" -n 1 \
-    --export=ALL,STAGE="$stage",REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR",STEP2_SEED="$STEP2_SEED",FIGURE="$FIGURE",FIG1_RULE="$FIG1_RULE",FIG1_PROB="$FIG1_PROB",FIG1_Z="$FIG1_Z",FIG2_THRESHOLD="$FIG2_THRESHOLD",FIG2_WEIGHT="$FIG2_WEIGHT",FIG2_MIN_GAIN="$FIG2_MIN_GAIN",FIG1_SHOW="$FIG1_SHOW",STEP2B_BLOCKS="$STEP2B_BLOCKS",STEP2B_MIN_INNER="$STEP2B_MIN_INNER",STEP2_WEIGHTS="$STEP2_WEIGHTS",STEP1_SESSION="$STEP1_SESSION",STEP1_ONSET="$STEP1_ONSET",STEP1_LAG_STEP="$STEP1_LAG_STEP",GRANGER_BLOCK_ROWS="$GRANGER_BLOCK_ROWS",PERM_N="$PERM_N",PERM_CHAINS="$PERM_CHAINS",PERM_ITER="$PERM_ITER",PERM_SEED_BASE="$PERM_SEED_BASE" \
+    --export=ALL,STAGE="$stage",REPO_DIR="$REPO_DIR",RUN_DIR="$RUN_DIR",STEP2_SEED="$STEP2_SEED",FIGURE="$FIGURE",FIG1_RULE="$FIG1_RULE",FIG1_PROB="$FIG1_PROB",FIG1_Z="$FIG1_Z",FIG2_THRESHOLD="$FIG2_THRESHOLD",FIG2_WEIGHT="$FIG2_WEIGHT",FIG2_MIN_GAIN="$FIG2_MIN_GAIN",FIG1_SHOW="$FIG1_SHOW",STEP2B_BLOCKS="$STEP2B_BLOCKS",STEP2B_MIN_INNER="$STEP2B_MIN_INNER",STEP2_WEIGHTS="$STEP2_WEIGHTS",STEP1_SESSION="$STEP1_SESSION",STEP1_ONSET="$STEP1_ONSET",STEP1_LAG_STEP="$STEP1_LAG_STEP",GRANGER_BLOCK_ROWS="$GRANGER_BLOCK_ROWS",PERM_N="$PERM_N",PERM_START="$PERM_START",PERM_CHAINS="$PERM_CHAINS",PERM_ITER="$PERM_ITER",PERM_SEED_BASE="$PERM_SEED_BASE" \
     "$@" "$SELF"
 }
 
@@ -336,8 +341,8 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     if [[ "$WHAT" == single_block ]]; then
       [[ -s "$BRIDGE_FILE" ]] || { echo "Missing $BRIDGE_FILE: run the bridge stage first" >&2; exit 1; }
       JSB=$(submit_stage sb_fit -J dsem_single_block -t 1-0 --mem=8G \
-              --array=0-"$PERM_N"%"$PERM_MAX_RUNNING" -o "$LOG_DIR/single_block_%a.out")
-      echo "Single-block test (observed + $PERM_N shuffles): job $JSB"
+              --array=$(( PERM_START == 1 ? 0 : PERM_START ))-"$PERM_N"%"$PERM_MAX_RUNNING" -o "$LOG_DIR/single_block_%a.out")
+      echo "Single-block test (shuffles $PERM_START-$PERM_N$( (( PERM_START == 1 )) && echo ' + observed')): job $JSB"
     fi
     sdep=""; [[ -n "$JSB" ]] && sdep="--dependency=afterany:$JSB"
     JSS=$(submit_stage sb_summary -J dsem_sb_summary -t 0-1 --mem=8G $sdep -o "$LOG_DIR/single_block_summary.out")
@@ -362,16 +367,17 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
       fi
     fi
     if [[ "$WHAT" == permutations || "$WHAT" == perm2a ]]; then
-      n_tasks=$((PERM_N * n_beh))
+      n_tasks=$(( (PERM_N - PERM_START + 1) * n_beh ))
+      (( n_tasks > 0 )) || { echo "PERM_N must be >= PERM_START" >&2; exit 1; }
       bdep=""; [[ -n "$JB" ]] && bdep="--dependency=afterok:$JB"
       JP2A=$(submit_stage perm2a -J dsem_perm2a -t "$TIME_LONG" --mem="$MEM_PERM" $bdep \
                --array=0-$((n_tasks - 1))%"$PERM_MAX_RUNNING" -o "$LOG_DIR/perm2a_%a.out")
-      echo "Perm 2a  ($PERM_N permutations x $n_beh behaviours):  job $JP2A"
+      echo "Perm 2a  (permutations $PERM_START-$PERM_N x $n_beh behaviours):  job $JP2A"
     fi
     if [[ "$WHAT" == permutations || "$WHAT" == perm2b ]]; then
       JP2B=$(submit_stage perm2b -J dsem_perm2b -t "$TIME_LONG" --mem="$MEM_PERM" $(pdep "$JP2A") \
-               --array=1-"$PERM_N"%"$PERM_MAX_RUNNING" -o "$LOG_DIR/perm2b_%a.out")
-      echo "Perm 2b  ($PERM_N permutations):              job $JP2B"
+               --array="$PERM_START"-"$PERM_N"%"$PERM_MAX_RUNNING" -o "$LOG_DIR/perm2b_%a.out")
+      echo "Perm 2b  (permutations $PERM_START-$PERM_N):            job $JP2B"
     fi
     if [[ "$WHAT" == permutations || "$WHAT" == perm_summary ]]; then
       JPS=$(submit_stage perm_summary -J dsem_perm_summary -t 0-2 --mem=8G $(pdep "$JP2B") \
@@ -490,7 +496,7 @@ bridge)
 
 perm2a)
   n_beh=${#BEHAVIOURS[@]}
-  k=$(( SLURM_ARRAY_TASK_ID / n_beh + 1 ))
+  k=$(( SLURM_ARRAY_TASK_ID / n_beh + ${PERM_START:-1} ))
   b="${BEHAVIOURS[$(( SLURM_ARRAY_TASK_ID % n_beh ))]}"
   pdir="$PERM_DIR/perm_$(printf '%03d' "$k")"
   banner "Permutation $k, Step 2a ($b)"
