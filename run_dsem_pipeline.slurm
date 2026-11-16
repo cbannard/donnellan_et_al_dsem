@@ -194,6 +194,7 @@ PERM_CHAINS="${PERM_CHAINS:-2}"      #   MCMC chains per Step 2 model in permuta
 PERM_ITER="${PERM_ITER:-500}"        #   warm-up (= sampling) iterations per chain
 PERM_MAX_RUNNING="${PERM_MAX_RUNNING:-100}"  # max permutation tasks running at once
 PERM_SEED_BASE="${PERM_SEED_BASE:-20261112}" # permutation k uses seed PERM_SEED_BASE + k
+MEM_BRIDGE="${MEM_BRIDGE:-64G}"      # bridge job: reads one Step 1 chain at a time
 MEM_PERM="${MEM_PERM:-16G}"          # permutation tasks read the small bridge file only
 STEP2_SEED="${STEP2_SEED:-}"         # blank = each Step 2 job draws a random seed
                                       #   (printed in its log and saved in its .rds);
@@ -370,7 +371,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     [[ -s "$BRIDGE_FILE" ]] && return 0
     mkdir -p "$PERM_DIR"
     if [[ -z "$JB_AUTO" ]]; then
-      JB_AUTO=$(submit_stage bridge -J dsem_bridge -t 0-6 $(mem_flag "$MEM_STEP2") -o "$LOG_DIR/bridge.out")
+      JB_AUTO=$(submit_stage bridge -J dsem_bridge -t 0-6 $(mem_flag "$MEM_BRIDGE") -o "$LOG_DIR/bridge.out")
       echo "Bridge   (Step 1 summaries; others wait for it): job $JB_AUTO"
     fi
   }
@@ -424,7 +425,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     JB=""; JP2A=""; JP2B=""
     if [[ "$WHAT" == permutations || "$WHAT" == bridge ]]; then
       if [[ "$WHAT" == bridge || ! -s "$BRIDGE_FILE" ]]; then
-        JB=$(submit_stage bridge -J dsem_bridge -t 0-6 $(mem_flag "$MEM_STEP2") -o "$LOG_DIR/bridge.out")
+        JB=$(submit_stage bridge -J dsem_bridge -t 0-6 $(mem_flag "$MEM_BRIDGE") -o "$LOG_DIR/bridge.out")
         echo "Bridge   (Step 1 summaries for Step 2):     job $JB"
       fi
     fi
