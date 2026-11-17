@@ -740,14 +740,17 @@ if (file.exists(checkpoint_file)) {
   chk <- readRDS(checkpoint_file)
   if (!is.null(chk$results))  results  <- chk$results
   if (!is.null(chk$loo_list)) loo_list <- chk$loo_list
-  resume_from <- chk$last_completed + 1L
+  # The checkpoint is written at the top of an iteration, before that combo is
+  # fitted. Newer checkpoints record the next combo to fit (next_combo); older
+  # ones stored that same index as last_completed, so it is re-fitted too.
+  resume_from <- if (!is.null(chk$next_combo)) chk$next_combo else chk$last_completed
   message(sprintf("  Resuming from combo %d / %d", resume_from, length(combos)))
 }
 
 progress_every <- checkpoint_every
 loop_start <- proc.time()[["elapsed"]]
 
-for (ii in seq(resume_from, length(combos))) {
+for (ii in seq_len(length(combos))[seq_len(length(combos)) >= resume_from]) {
   if (ii == resume_from || ii %% progress_every == 0L || ii == length(combos)) {
     elapsed <- proc.time()[["elapsed"]] - loop_start
     n_done  <- ii - resume_from + 1L
@@ -759,7 +762,8 @@ for (ii in seq(resume_from, length(combos))) {
       elapsed / 60, avg_per_combo, remaining / 60
     ))
     saveRDS(
-      list(last_completed = ii, results = results, loo_list = loo_list, seed = base_seed),
+      list(next_combo = ii, last_completed = ii - 1L, results = results,
+           loo_list = loo_list, seed = base_seed),
       checkpoint_file
     )
   }
@@ -795,7 +799,7 @@ for (ii in seq(resume_from, length(combos))) {
       pseudobma_weight  = NA_real_,
       stringsAsFactors = FALSE
     )
-    loo_list[[ii + 1L]] <- NULL
+    loo_list[ii + 1L] <- list(NULL)   # keep the slot; [[<- NULL would drop it
     next
   }
 
@@ -822,6 +826,13 @@ for (ii in seq(resume_from, length(combos))) {
   )
   loo_list[[ii + 1L]] <- res$loo
 }
+
+# All combos fitted: checkpoint so a failure after this point resumes at stacking.
+saveRDS(
+  list(next_combo = length(combos) + 1L, last_completed = length(combos),
+       results = results, loo_list = loo_list, seed = base_seed),
+  checkpoint_file
+)
 
 total_loop_elapsed <- proc.time()[["elapsed"]] - loop_start
 message(sprintf("Finished fitting all models in %.1f minutes", total_loop_elapsed / 60))
