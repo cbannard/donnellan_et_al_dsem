@@ -43,6 +43,15 @@
 #       The report also compares the number of blocks with a positive gain and
 #       the sum of positive gains with their permutation distributions.
 #
+#   Optional, for both modes:
+#   sets=<name>=<b>+<b>[;<name>=...]   test SETS of blocks instead of the 90 single
+#       blocks; each set is fitted as one model and compared with the
+#       intercept-only model. A block is x.y (the five lags of x -> y) or mean.y.
+#       e.g. sets="vocal_responses=CV.contingent+non_CV.contingent"
+#   set_tag=<tag>   (default sets) results go to PERMUTATIONS/block_sets/<tag>/
+#       and PERMUTATIONS/block_sets_<tag>_null.csv / _report.txt
+#   In fit mode k may be a range a-b: shuffles a..b are fitted in one process.
+#
 # Needs: <run_dir>/PERMUTATIONS/bridge.rds (make_bridge.R) and ./CDI_data.csv
 # =============================================================================
 
@@ -50,24 +59,31 @@ args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 2) stop("Usage: Rscript single_block_test.R fit|summary <run_dir> [k] [...]")
 mode    <- args[1]
 run_dir <- args[2]
-out_dir <- file.path(run_dir, "PERMUTATIONS", "single_block")
-dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 keyed_arg <- function(key, default) {
   hit <- grep(paste0("^", key, "="), args, value = TRUE)
   if (length(hit)) sub(paste0("^", key, "="), "", hit[length(hit)]) else default
 }
+sets_arg <- keyed_arg("sets", "")
+set_tag  <- keyed_arg("set_tag", "sets")
+use_sets <- nzchar(sets_arg)
+out_dir <- if (use_sets) file.path(run_dir, "PERMUTATIONS", "block_sets", set_tag) else
+  file.path(run_dir, "PERMUTATIONS", "single_block")
+out_stem <- if (use_sets) file.path(run_dir, "PERMUTATIONS", paste0("block_sets_", set_tag)) else
+  file.path(run_dir, "PERMUTATIONS", "single_block")
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
 # =============================================================================
 # FIT one run (observed or one shuffle)
 # =============================================================================
 if (mode == "fit") {
-  k <- as.integer(args[3])
-  if (is.na(k) || k < 0) stop("k must be 0 (observed) or a positive permutation number")
+  k_rng <- as.integer(strsplit(args[3], "-", fixed = TRUE)[[1]])
+  if (any(is.na(k_rng)) || any(k_rng < 0)) stop("k must be 0 (observed), a positive permutation number or a range a-b")
+  k_all <- if (length(k_rng) == 2) seq(k_rng[1], k_rng[2]) else k_rng
   perm_seed_base <- as.integer(keyed_arg("perm_seed_base", 20261112))
   n_chains <- as.integer(keyed_arg("chains", 4))
   n_iter   <- as.integer(keyed_arg("iter", 500))
-  out_csv  <- file.path(out_dir, sprintf("run_%03d.csv", k))
-  if (file.exists(out_csv)) { message("Exists, skipping: ", out_csv); quit(save = "no") }
+  k_all <- k_all[!file.exists(file.path(out_dir, sprintf("run_%03d.csv", k_all)))]
+  if (!length(k_all)) { message("All requested runs exist, nothing to do"); quit(save = "no") }
 
   suppressPackageStartupMessages({ library(cmdstanr); library(posterior); library(loo); library(dplyr) })
 
@@ -82,16 +98,10 @@ if (mode == "fit") {
   merged <- left_join(data.frame(participant_id = as.character(prep$participants), stringsAsFactors = FALSE),
                       cdi[, c("participant_id", "us18_imp")], by = "participant_id")
   has_outcome <- !is.na(merged$us18_imp)
-  y <- log1p(as.numeric(merged$us18_imp[has_outcome]))
+  y_obs <- log1p(as.numeric(merged$us18_imp[has_outcome]))
   Zm <- bridge$z_hat[has_outcome, , drop = FALSE]
   Zs <- bridge$z_sd[has_outcome, , drop = FALSE]
 
-  # Same shuffle as select_terms_for_individual_behaviours.R / final_term_weighting.R
-  if (k > 0) {
-    set.seed(perm_seed_base + k)
-    y <- y[sample.int(length(y))]
-    message("Shuffle ", k, " (permute_seed=", perm_seed_base + k, ")")
-  } else message("Observed vocabulary")
 
   # The 90 blocks: q-columns of the z_person vector.
   blocks <- do.call(rbind, lapply(seq_len(V), function(v) {
@@ -104,6 +114,26 @@ if (mode == "fit") {
           data.frame(group = behaviours[v], block = paste0("mean ", behaviours[v]),
                      cols = I(list(V * K + v)), stringsAsFactors = FALSE))
   }))
+
+  if (use_sets) {
+    q_of <- function(tok) {
+      p <- strsplit(tok, ".", fixed = TRUE)[[1]]
+      if (length(p) != 2) stop("Blocks in sets= must look like x.y or mean.y: ", tok)
+      yi <- match(p[2], behaviours)
+      if (p[1] == "mean") { if (is.na(yi)) stop("Unknown behaviour: ", tok); return(V * K + yi) }
+      xi <- match(p[1], behaviours)
+      if (is.na(xi) || is.na(yi)) stop("Unknown behaviour: ", tok)
+      ks <- (xi - 1L) * K_per_pair + seq_len(K_per_pair)
+      as.integer((ks - 1L) * V + yi)
+    }
+    defs <- strsplit(strsplit(sets_arg, ";", fixed = TRUE)[[1]], "=", fixed = TRUE)
+    blocks <- do.call(rbind, lapply(defs, function(d) {
+      toks <- strsplit(d[2], "+", fixed = TRUE)[[1]]
+      data.frame(group = "set", block = d[1], cols = I(list(unlist(lapply(toks, q_of)))),
+                 stringsAsFactors = FALSE)
+    }))
+    message("Sets: ", paste(sprintf("%s (%d terms)", blocks$block, lengths(blocks$cols)), collapse = "; "))
+  }
 
   stan_intercept <- "
 data { int<lower=1> N; vector[N] y; real<lower=0> prior_sd_sigma; }
@@ -135,13 +165,22 @@ generated quantities {
 "
   mod_int <- cmdstan_model(write_stan_file(stan_intercept))
   mod_nrm <- cmdstan_model(write_stan_file(stan_normal))
-  fit_seed <- (perm_seed_base %% 100000L) * 1000L + k * 100L
   fit_loo <- function(mod, data, seed) {
     fit <- mod$sample(data = data, seed = seed, chains = n_chains, iter_warmup = n_iter,
                       iter_sampling = n_iter, refresh = 0, show_messages = FALSE)
     ll <- fit$draws("log_lik", format = "matrix")
     list(fit = fit, loo = suppressWarnings(loo::loo(ll, cores = 1)))
   }
+  for (k in k_all) {
+  out_csv  <- file.path(out_dir, sprintf("run_%03d.csv", k))
+  y <- y_obs
+  # Same shuffle as select_terms_for_individual_behaviours.R / final_term_weighting.R
+  if (k > 0) {
+    set.seed(perm_seed_base + k)
+    y <- y[sample.int(length(y))]
+    message("Shuffle ", k, " (permute_seed=", perm_seed_base + k, ")")
+  } else message("Observed vocabulary")
+  fit_seed <- (perm_seed_base %% 100000L) * 1000L + k * 100L
   N <- length(y)
   base <- fit_loo(mod_int, list(N = N, y = y, prior_sd_sigma = 2.5), fit_seed)
   base_pw <- base$loo$pointwise[, "elpd_loo"]
@@ -168,6 +207,7 @@ generated quantities {
   out <- cbind(run = k, blocks[, c("group", "block")], do.call(rbind, res))
   write.csv(out, out_csv, row.names = FALSE)
   message("Saved ", out_csv)
+  }
   quit(save = "no")
 }
 
@@ -198,7 +238,7 @@ if (mode == "summary") {
   null_exceed <- vapply(out$elpd_gain, function(g) mean(colSums(null_mat >= g - 1e-12, na.rm = TRUE)), numeric(1))
   fdr <- pmin(1, null_exceed / seq_len(nrow(out)))
   out$q_single <- rev(cummin(rev(fdr)))
-  write.csv(out, file.path(run_dir, "PERMUTATIONS", "single_block_null.csv"), row.names = FALSE)
+  write.csv(out, paste0(out_stem, "_null.csv"), row.names = FALSE)
   n_pos <- sum(out$elpd_gain > 0, na.rm = TRUE)
   null_pos <- colSums(null_mat > 0, na.rm = TRUE)
   sum_pos <- sum(pmax(out$elpd_gain, 0), na.rm = TRUE)
@@ -207,7 +247,7 @@ if (mode == "summary") {
   thr <- unname(quantile(null_max, 0.95))
   fmt <- function(df) paste(capture.output(print(format(df, digits = 3), row.names = FALSE)), collapse = "\n")
   rep <- paste0(
-    "Single-block test: each block alone vs intercept-only (ELPD gain, leave-one-child-out)\n",
+    if (use_sets) paste0("Block-set test [", set_tag, "]: each set of blocks vs intercept-only (ELPD gain, leave-one-child-out)\n") else "Single-block test: each block alone vs intercept-only (ELPD gain, leave-one-child-out)\n",
     n, " shuffles of vocabulary; smallest attainable p = ", signif(1 / (n + 1), 3), "\n\n",
     sprintf("Familywise threshold (95th percentile of the largest gain of any block per shuffle): %.2f\n", thr),
     sprintf("Blocks above it (p_single_max < .05): %d\n", sum(out$p_single_max < 0.05)),
@@ -223,9 +263,9 @@ if (mode == "summary") {
                      "null_q95", "p_single", "p_single_max", "q_single")], 25)), "\n\n",
     "elpd_gain: ELPD(block alone) - ELPD(intercept only); positive = better held-out prediction.\n",
     "effect_*: block effect on log vocabulary (sum of its coefficients) in the single-block model.\n",
-    "p_single: vs the same block under shuffling; p_single_max: vs the best of all 90 blocks per shuffle;\n",
+    sprintf("p_single: vs the same block under shuffling; p_single_max: vs the best of all %d blocks/sets per shuffle;\n", nrow(out)),
     "q_single: expected share of chance findings among this block and all blocks ranked above it.\n")
-  writeLines(rep, file.path(run_dir, "PERMUTATIONS", "single_block_report.txt"))
+  writeLines(rep, paste0(out_stem, "_report.txt"))
   cat(rep)
   quit(save = "no")
 }
