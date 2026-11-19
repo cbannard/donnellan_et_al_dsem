@@ -190,6 +190,9 @@ PERM_N="${PERM_N:-100}"              # permutation null: run permutations PERM_S
 PERM_START="${PERM_START:-1}"        #   (e.g. PERM_START=101 PERM_N=1000 adds 900 to an existing 100)
 STEP2B_GROUPING="${STEP2B_GROUPING:-target}" # perm_groups variants: target | source grouping
 STEP2B_EXCLUDE="${STEP2B_EXCLUDE:-}"         #   blocks left out, e.g. contingent.contingent
+# sbatch --export splits on commas, so several exclusions travel joined by "+"
+# and are turned back into a comma-separated list for final_term_weighting.R.
+STEP2B_EXCLUDE="${STEP2B_EXCLUDE//,/+}"
 PERM_CHAINS="${PERM_CHAINS:-2}"      #   MCMC chains per Step 2 model in permutation runs
 PERM_ITER="${PERM_ITER:-500}"        #   warm-up (= sampling) iterations per chain
 PERM_MAX_RUNNING="${PERM_MAX_RUNNING:-100}"  # max permutation tasks running at once
@@ -204,7 +207,7 @@ BEHAVIOURS=(contingent gaze CV non_CV index_point open_point give show other_ges
 # Variant group-level analyses write under their own Step 2b prefix.
 VARIANT_TAG=""
 [[ "${STEP2B_GROUPING:-target}" == source ]] && VARIANT_TAG="src"
-[[ -n "${STEP2B_EXCLUDE:-}" ]] && VARIANT_TAG="${VARIANT_TAG:+${VARIANT_TAG}_}excl_${STEP2B_EXCLUDE//[.,]/_}"
+[[ -n "${STEP2B_EXCLUDE:-}" ]] && VARIANT_TAG="${VARIANT_TAG:+${VARIANT_TAG}_}excl_${STEP2B_EXCLUDE//[.,+]/_}"
 GRANGER_PREFIX="granger_loocv"
 STEP2B_PREFIX="dsem_selection_from_single_behaviour_sets"
 VARIANT_PREFIX="${STEP2B_PREFIX}${VARIANT_TAG:+_$VARIANT_TAG}"
@@ -620,7 +623,7 @@ perm2b_only)
   Rscript "$REPO_DIR/final_term_weighting.R" "$pdir" "$STEP1_DIR" "$VARIANT_PREFIX" \
     bridge="$BRIDGE_FILE" $perm_args seed=$(( PERM_SEED_BASE + 1000 * k )) \
     blocks=all no_selection=1 weights="$STEP2_WEIGHTS" chains="$chains_k" iter="$PERM_ITER" \
-    grouping="$STEP2B_GROUPING" ${STEP2B_EXCLUDE:+exclude=$STEP2B_EXCLUDE}
+    grouping="$STEP2B_GROUPING" ${STEP2B_EXCLUDE:+exclude=${STEP2B_EXCLUDE//+/,}}
   ;;
 
 perm_summary)
