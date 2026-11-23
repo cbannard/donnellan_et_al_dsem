@@ -66,7 +66,7 @@ Statement).
 
 ## Reproducing the paper
 
-Run from a login node in a checkout of this branch. Everything is written under
+Run from a login node in a checkout of `main`. Everything is written under
 `RUN_DIR`; nothing is written to the repository. Do not edit or `git pull` the
 scripts while jobs from the checkout are queued or running: jobs read the R
 scripts when they start.
