@@ -19,11 +19,11 @@ and permutation tests against shuffled vocabulary (Table S2 and the text).
 
 | Branch | What it reproduces |
 |---|---|
-| **`reviewer_response`** (this branch) | **The revised paper**: session-aware model (`STEP1_SESSION=1`) and all permutation tests |
-| `resubmission_results`, `main` | Earlier analysis with the two recording sessions joined end to end (no longer reported) |
+| **`main`**, `reviewer_response` | **The revised paper**: session-aware model (`STEP1_SESSION=1`) and all permutation tests |
+| `resubmission_results` | Earlier analysis with the two recording sessions joined end to end (no longer reported) |
 | `original_submission` | The original submission |
 
-With no options set, the scripts on this branch reproduce the earlier
+With no options set, the scripts reproduce the earlier
 joined-sessions run; the settings used for the paper are given below.
 
 ---
