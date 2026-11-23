@@ -1,9 +1,8 @@
 # Study 1 (DSEM): temporal organisation of infant–caregiver interaction and later vocabulary
 
-Code and data for Study 1 of Donnellan, Bannard et al., *Identifying interaction
-sequences that drive language development* (Phil. Trans. R. Soc. B,
-RSTB-2025-0407). Study 2 (the CNN) is in
-[cbannard/donnellan_et_al_cnn](https://github.com/cbannard/donnellan_et_al_cnn).
+Code and data for Study 1 of *Identifying interaction sequences that drive
+language development* (Phil. Trans. R. Soc. B, RSTB-2025-0407). Study 2 (the
+CNN) has its own repository, linked from the paper.
 
 Step 1 fits a Bayesian multilevel logistic vector autoregression (VAR(5)) to the
 coded behaviour time series of 58 infant–caregiver dyads and tests which
@@ -37,7 +36,7 @@ end to end (commit `9b37810`); it is not reported in the revised paper.
   contingent talk), `gaze` (infant gaze to the caregiver's face), `CV`,
   `non_CV` (vocalisations), `index_point`, `open_point`, `give`, `show` and
   `other_gesture`; the two remaining rows are not used. The coding scheme is
-  described in Donnellan et al. (2020).
+  described in the paper.
 - **`CDI_data.csv`**: `participant`, `us18_imp`, the expressive vocabulary
   (Lincoln CDI) at 18 months, with missing values imputed from all available
   CDI measures by predictive mean matching (`mice`), as described in the paper.
