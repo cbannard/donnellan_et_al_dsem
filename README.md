@@ -15,16 +15,14 @@ and permutation tests against shuffled vocabulary (Table S2 and the text).
 
 ---
 
-## Which version reproduces the paper
+## Versions
 
-| Branch | What it reproduces |
-|---|---|
-| **`main`**, `reviewer_response` | **The revised paper**: session-aware model (`STEP1_SESSION=1`) and all permutation tests |
-| `resubmission_results` | Earlier analysis with the two recording sessions joined end to end (no longer reported) |
-| `original_submission` | The original submission |
-
-With no options set, the scripts reproduce the earlier
-joined-sessions run; the settings used for the paper are given below.
+The `main` branch reproduces the revised paper: the session-aware model
+(`STEP1_SESSION=1`) and all of the permutation tests, with the settings given
+under *Reproducing the paper*. The code of the original submission is on the
+`original_submission` branch. With no options set, the scripts on `main`
+reproduce the earlier analysis in which the two recording sessions were joined
+end to end (commit `9b37810`); it is not reported in the revised paper.
 
 ---
 
