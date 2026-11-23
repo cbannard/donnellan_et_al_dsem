@@ -1,309 +1,203 @@
-# 
+# Study 1 (DSEM): temporal organisation of infant–caregiver interaction and later vocabulary
 
-A two-step Bayesian pipeline for modelling infant behaviour time-series data and identifying predictors of language outcomes (CDI scores).
+Code and data for Study 1 of Donnellan, Bannard et al., *Identifying interaction
+sequences that drive language development* (Phil. Trans. R. Soc. B,
+RSTB-2025-0407). Study 2 (the CNN) is in
+[cbannard/donnellan_et_al_cnn](https://github.com/cbannard/donnellan_et_al_cnn).
+
+Step 1 fits a Bayesian multilevel logistic vector autoregression (VAR(5)) to the
+coded behaviour time series of 58 infant–caregiver dyads and tests which
+behaviours predict which (Granger-style PSIS-LOO comparisons; Figure 1,
+Table S1). Step 2 asks which features of each child's estimated dynamics predict
+18-month expressive vocabulary: each predictor on its own (single-predictor
+test; Figure 2), behaviour groups in a model search with pseudo-BMA+ weights,
+and permutation tests against shuffled vocabulary (Table S2 and the text).
 
 ---
 
-## Overview
+## Which version reproduces the paper
 
-The pipeline fits a multilevel Vector Autoregression (VAR) model to repeated-measures behaviour data, then uses Bayesian model averaging to identify which lag predictors (and their directions) best predict CDI vocabulary scores.
+| Branch | What it reproduces |
+|---|---|
+| **`reviewer_response`** (this branch) | **The revised paper**: session-aware model (`STEP1_SESSION=1`) and all permutation tests |
+| `resubmission_results`, `main` | Earlier analysis with the two recording sessions joined end to end (no longer reported) |
+| `original_submission` | The original submission |
 
+With no options set, the scripts on this branch reproduce the earlier
+joined-sessions run; the settings used for the paper are given below.
+
+---
+
+## Data
+
+- **`data_full.zip`**: the coded behaviour time series, one CSV per child and
+  session, `data_full/p<child>_11m.csv` and `p<child>_12m.csv` (116 files,
+  58 children × 2 sessions). Each file has a header row of time stamps
+  (0, 0.2, 0.4, … s; 4,750 columns = 950 s at 5 Hz, shorter recordings padded
+  with zeros) and one row per coded category, 0/1 for each 200 ms sample. The
+  first nine rows are, in order, `contingent` (caregiver semantically
+  contingent talk), `gaze` (infant gaze to the caregiver's face), `CV`,
+  `non_CV` (vocalisations), `index_point`, `open_point`, `give`, `show` and
+  `other_gesture`; the two remaining rows are not used. The coding scheme is
+  described in Donnellan et al. (2020).
+- **`CDI_data.csv`**: `participant`, `us18_imp`, the expressive vocabulary
+  (Lincoln CDI) at 18 months, with missing values imputed from all available
+  CDI measures by predictive mean matching (`mice`), as described in the paper.
+  Step 2 models log(1 + `us18_imp`).
+
+The raw video recordings are not shared (see the paper's Data Availability
+Statement).
+
+---
+
+## Requirements
+
+- A Slurm cluster. `run_dsem_pipeline.slurm` submits every stage as its own job
+  with dependencies. Its settings (partition `himem`, module
+  `apps/gcc/R/4.4.2`) are those of the University of Manchester CSF3 and can be
+  changed at the top of the script (`PARTITION`, `R_MODULE`).
+- R 4.4.2 with `cmdstanr`, `posterior`, `loo`, `dplyr` and `ggplot2`
+  (optional: `ragg` for PNG figures, `bayesplot` for convergence plots), and
+  CmdStan 2.40.0 (≥ 2.33 is needed for Pathfinder).
+- Compute: Step 1 is 16 single-chain fits, each several hours to a day and
+  about 1.7 GB of output. Granger and Step 2 take a few hours. Each group-level
+  permutation analysis takes about 5.5 h of CPU per shuffle, the
+  single-predictor test about 6 min per shuffle (one CPU per task).
+
+---
+
+## Reproducing the paper
+
+Run from a login node in a checkout of this branch. Everything is written under
+`RUN_DIR`; nothing is written to the repository. Do not edit or `git pull` the
+scripts while jobs from the checkout are queued or running: jobs read the R
+scripts when they start.
+
+```bash
+# Settings used for every result in the paper
+export RUN_DIR=/scratch/$USER/dsem_session
+export STEP1_SESSION=1                       # lags within each session + session intercepts
+export STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all
+export FIG1_Z=z_child FIG2_WEIGHT=gain       # Figure 1: child-clustered z; Figure 2: single-predictor gain
+export PERM_MAX_RUNNING=64                   # tasks of one array allowed to run at once
+
+# 1. Step 1, convergence, Granger (Figure 1, Table S1), Step 2a/2b, figures, tables
+bash run_dsem_pipeline.slurm
+
+# 2. Single-predictor test: observed + 1,000 shuffles (Figure 2, q-values)
+PERM_N=1000 bash run_dsem_pipeline.slurm single_block
+
+# 3. Group-level permutation tests (Step 2b only). Set N to the number of
+#    shuffles reported in the paper's Methods.
+N=200
+PERM_N=$N bash run_dsem_pipeline.slurm perm_groups                        # grouped by behaviour predicted
+STEP2B_GROUPING=source PERM_N=$N bash run_dsem_pipeline.slurm perm_groups # grouped by preceding behaviour
+STEP2B_EXCLUDE=contingent.contingent PERM_N=$N bash run_dsem_pipeline.slurm perm_groups
+STEP2B_GROUPING=source STEP2B_EXCLUDE=contingent.contingent PERM_N=$N bash run_dsem_pipeline.slurm perm_groups
+STEP2B_EXCLUDE=contingent.contingent,mean.contingent PERM_N=$N bash run_dsem_pipeline.slurm perm_groups
+STEP2B_GROUPING=source STEP2B_EXCLUDE=contingent.contingent,mean.contingent PERM_N=$N bash run_dsem_pipeline.slurm perm_groups
+
+# 4. Joint tests of contingent responses to vocalisations and to all behaviours
+#    (1,000 shuffles; submit from the repository folder)
+sbatch --array=0-10 -o $RUN_DIR/logs/block_sets_%a.out run_block_sets.slurm
+#    when all 11 tasks have finished:
+Rscript single_block_test.R summary $RUN_DIR sets=x set_tag=responses
+
+# 5. Redraw Figure 2 and the tables once everything has finished
+FIGURE=2 bash run_dsem_pipeline.slurm figures
+bash run_dsem_pipeline.slurm tables
 ```
-Step 1:   fitVAR.R                               → dsem_step1_*.rds
-Step 1b:  granger_analysis.R          (optional) → granger_loocv_*.csv/.rds
-Step 2a:  select_terms_for_individual_behaviours.R → dsem_selection_*_single_behaviour.rds
-Step 2b:  final_term_weighting.R                 → dsem_selection_from_single_behaviour_sets*.csv/.rds
-```
+
+Stages 2–4 can be submitted together after stage 1 has finished; they wait for
+the bridge file (`PERMUTATIONS/bridge.rds`, a per-child summary of the Step 1
+posterior), which the first of them creates. A summary job runs after each
+array. To re-run one by hand, use `Rscript permutation_null.R $RUN_DIR <prefix>`,
+where `<prefix>` is `dsem_selection_from_single_behaviour_sets` followed by the
+analysis's tag, e.g. `dsem_selection_from_single_behaviour_sets_src_excl_contingent_contingent`.
+Shuffles can be added to any analysis later with the same settings and
+`PERM_START=<first new> PERM_N=<last>`; finished shuffles are skipped.
+
+**Seeds.** Step 1 chain *n* uses seed *n*. Shuffle *k* permutes the vocabulary
+scores with seed `PERM_SEED_BASE + k` (default 20261112), the same in every
+permutation analysis, and fits its models with seed `PERM_SEED_BASE + 1000k`.
+Observed Step 2 runs draw a random seed unless `STEP2_SEED` is set; the seed is
+printed in each log (`logs/step2a_*.out`, `logs/step2b.out`) and stored in the
+output, so a run can be repeated exactly by passing `seed=<value>` to the
+script.
+
+### Where each result comes from (all under `RUN_DIR`)
+
+| Paper | File |
+|---|---|
+| Convergence (Methods) | `CONVERGENCE/convergence_report.txt` |
+| Figure 1, Step 1 results, Table S1 | `FIGURES/figure1_*`, `GRANGER/granger_loocv_pairwise_elpd.csv`, `GRANGER/granger_direction.csv`, `TABLES/table_S1_granger_pairs.csv`; Pareto-k counts in `logs/granger_*.out` |
+| Figure 2 and the single-predictor results (gain, p, corrected p, q, effects) | `FIGURES/figure2_*`, `PERMUTATIONS/single_block_null.csv`, `PERMUTATIONS/single_block_report.txt` |
+| Group and within-group inclusion probabilities, model ELPDs | `MODELS-STEP1/dsem_selection_from_single_behaviour_sets*_stacking_weights.csv`, `TABLES/table_S2_step2_blocks.csv` |
+| Group-level p-values (main analyses and reduced groups) | `PERMUTATIONS/permutation_null[_<tag>]_report.txt`, tags `src`, `excl_contingent_contingent`, `src_excl_contingent_contingent`, `excl_contingent_contingent_mean_contingent`, `src_excl_contingent_contingent_mean_contingent` |
+| Joint tests of contingent responses | `PERMUTATIONS/block_sets_responses_report.txt` |
+| Table S2 | `TABLES/table_S2_step2_blocks.csv` (the `final_inclusion`, `p_inner`, `p_final` and `p_final_max` columns are not used for this model) |
 
 ---
 
 ## Scripts
 
-### `fitVAR.R` — Step 1: Multilevel VAR
-
-Fits a Bayesian multilevel logistic VAR(p) model to all behaviours jointly, using a non-centred parameterisation over participants. All behaviours are binary, so each person has lag coefficients and intercepts only — there are no residual-variance (log-variance) parameters, since a Bernoulli outcome's variance is fixed by its probability. The script stops if any behaviour is not 0/1. Lagged 0/1 predictors are centred but not scaled, so lag coefficients are on the log-odds scale. Priors: normal(0, 1) on lag coefficients and their between-child SDs, normal(0, 5) on population intercepts, half-normal(0, 2) on the between-child SD of intercepts. Initialises HMC with Pathfinder variational inference for faster warmup.
-
-**Usage**
-```bash
-Rscript fitVAR.R [job_id]
-```
-`job_id` defaults to `Sys.getenv("SLURM_JOB_ID")` or `"local"`.
-
-**Key parameters** (edit at top of script)
-
-| Parameter | Default | Description |
+| Script | Stage | What it does |
 |---|---|---|
-| `T_subsample` | 3165 | Max time points per participant |
-| `p` | 5 | VAR lag order |
-| `grainsize` | 1 | Parallelism grain for `partial_sum_lpmf` |
-| `chains` | 1 | HMC chains |
-| `iter_warmup` | 1000 | Warmup iterations |
-| `iter_sampling` | 1000 | Post-warmup draws |
-| `adapt_delta` | 0.95 | HMC target acceptance rate |
-| `use_pathfinder` | TRUE | Use Pathfinder to initialise HMC |
+| `run_dsem_pipeline.slurm` | all | Submits the stages below as Slurm jobs with dependencies; `bash run_dsem_pipeline.slurm <stage>` re-runs one stage. Options are environment variables (below, and in the comments at the top of the script). |
+| `fitVAR.R` | Step 1 | Bayesian multilevel logistic VAR(5) in Stan (cmdstanr, Pathfinder initialisation), one chain per task. Child-specific intercepts and lag effects (non-centred). Priors: N(0, 5) population intercepts with a half-N(0, 2) child SD; N(0, 1) lags and session shifts with half-N(0, 1) child SDs. Lagged predictors are 0/1, centred, not scaled. Every third sample is predicted (3,165 per child). |
+| `check_convergence.R` | Step 1 | R-hat, bulk/tail ESS, divergences, tree depth and E-BFMI across chains. |
+| `granger_analysis.R` | Step 1b | For each of the 72 directed pairs x → y, the PSIS-LOO ELPD of the full model for y minus that of the model with x's lags set to zero, with observation-level, child-clustered (used in the paper) and block (20 modelled samples ≈ 12 s) SEs. |
+| `granger_direction.R` | Step 1c | Posterior probability that the population-level x → y effect, summed over lags, is positive. |
+| `select_terms_for_individual_behaviours.R` | Step 2a | Within one behaviour group, all 1,023 combinations of its 10 predictor blocks (9 lag blocks and the mean), each an error-in-variables regression of log vocabulary on the children's posterior means with their posterior SDs; PSIS leave-one-child-out; within-group inclusion probabilities. |
+| `final_term_weighting.R` | Step 2b | All 511 combinations of behaviour groups and the intercept-only model; pseudo-BMA+ weights; group inclusion probabilities. Options include `blocks=all`, `weights=pseudobma`, `grouping=source` (group blocks by the predicting behaviour), `exclude=x.y[,…]` or `mean.y` (leave blocks out of every model), `bridge=` and `permute_seed=`. Resumes from its checkpoint if interrupted. |
+| `make_bridge.R` | permutations | Per-child posterior mean and SD of every Step 2 predictor, so that permutation runs need not load the Step 1 draws. |
+| `permutation_null.R` | permutations | Compares an observed Step 2b run with its shuffled runs: group p-values (`p`, and `p_max` corrected for the nine groups), the intercept-only model's weight and the best model's ELPD. |
+| `single_block_test.R` | single-predictor test | Each of the 90 blocks alone vs the intercept-only model (ELPD gain), for the observed and the shuffled vocabulary scores; `summary` gives p, the familywise p over 90 blocks, permutation q-values, and the number and sum of positive gains. `sets=name=x.y+x.y;…` tests sets of blocks as single models instead. |
+| `run_block_sets.slurm` | joint tests | Array job for `single_block_test.R sets=…` (task 0 observed, tasks 1–10 shuffles 1–1,000). |
+| `make_figures.R` | figures | Figure 1 (`z=z_child`: strong edges solid) and Figure 2 (`weight=gain`: every predictor with a positive single-predictor gain; width = gain, colour = sign of its effect). |
+| `make_tables.R` | tables | Tables S1 and S2. |
+| `monitor_progress.sh` | — | Progress of running Step 2 jobs. |
 
-**Input files**
-- `data_full/*.csv` — per-participant behaviour time series (auto-detected by pattern)
-- `CDI_data.csv` — CDI vocabulary scores (not used directly here; required in Steps 2a/2b)
+### Pipeline options (environment variables)
 
-**Output**
-- `dsem_step1_<job_id>.rds` — list with:
-  - `$fit` — raw cmdstanr fit object
-  - `$draws` — posterior draws (`posterior` package format), including `z_person[i,q]`
-  - `$prep` — data preparation object (see [RDS structure](#rds-structure) below)
-
-**Dependencies**
-- `cmdstanr` (≥ 0.5.3 for Pathfinder), CmdStan ≥ 2.33
-- `posterior`, `dplyr`
-
----
-
-### `granger_analysis.R` — Step 1b: Granger-causality screening (optional)
-
-For each directed pair (x → y), computes the PSIS-LOO ELPD difference between the full VAR model and a reduced model with x's lag coefficients zeroed out for outcome y. A positive difference supports Granger causality. This step is independent of Steps 2a/2b and its output is not consumed downstream.
-
-**Usage**
-```bash
-# Single file
-Rscript granger_analysis.R dsem_step1_1.rds
-
-# Folder of files (combined automatically)
-Rscript granger_analysis.R MODELS-STEP1/ granger_loocv
-
-# SLURM array job (one shard per task)
-Rscript granger_analysis.R MODELS-STEP1/ granger_loocv array_task_id=1 array_task_count=9
-```
-
-**Input**
-- Step 1 RDS file or folder of RDS files
-
-**Output**
-- `<output_prefix>_pairwise_elpd.csv` and `.rds` — one row per directed pair (x, y) with columns:
-  `predictor_x`, `outcome_y`, `elpd_full`, `elpd_reduced_drop_xlags`, `elpd_diff_full_minus_reduced`, `se_diff`, `z_score`, `supports_x_granger_causing_y`, `strong_support_diff_gt_2se`, `mean_coef_x_to_y`, `prop_positive_x_to_y`, `coef_direction_x_to_y`
-
-**Dependencies**
-- `posterior`, `loo`
-
----
-
-### `select_terms_for_individual_behaviours.R` — Step 2a: Within-behaviour block selection
-
-For each outcome behaviour in turn, fits an error-in-variables Gaussian bridge model of CDI scores on VAR parameters (posterior means and SDs as uncertain predictors). Enumerates all 2^(V+1) − 1 subsets of predictor blocks for that behaviour (V lag blocks plus the mean), computes PSIS-LOO for each, and derives per-block inclusion weights via stacking and pseudoBMA+.
-
-**Usage**
-```bash
-Rscript select_terms_for_individual_behaviours.R <behaviour_name> [step1_folder]
-```
-Runs one behaviour per call (`step1_folder` defaults to `MODELS-DSEM`); results are written to `step1_folder`. Run as a SLURM array job with one task per behaviour.
-
-**Input**
-- `dsem_step1_*.rds` or `dsem_result_*.rds` in the step1 folder
-- `CDI_data.csv` — must be present in the **current working directory**
-
-**Output** (one file per behaviour in output folder)
-- `dsem_selection_<behaviour>_single_behaviour.rds` — list with:
-  - `$behaviour` — behaviour name (character)
-  - `$block_inclusion` — data frame: `block_idx`, `block_label`, `inclusion_weight`, `effect_direction` (or `NULL` if no combos fitted)
-  - `$combo_summary`, `$stacking_weights`, `$pseudobma_weights`, `$baseline_elpd`, `$n_cc`
-
-**Dependencies**
-- `cmdstanr`, `posterior`, `loo`, `dplyr`
-
----
-
-### `final_term_weighting.R` — Step 2b: Two-level stacking across behaviours
-
-Combines the within-behaviour block inclusion weights from Step 2a with outer stacking weights across behaviour-set combinations to produce final per-term inclusion weights.
-
-The final weight for a predictor term `q` is:
-
-```
-w_final(q) = outer_inclusion(behaviour(q)) × inner_inclusion(q | behaviour)
-```
-
-where `outer_inclusion` sums stacking weights over all behaviour-set combinations containing that behaviour, and `inner_inclusion` is the within-behaviour block weight from Step 2a.
-
-**Usage**
-```bash
-Rscript final_term_weighting.R [selection_folder] [step1_folder] [output_prefix]
-```
-Defaults: `selection_folder = "DSEM-MODELS-STEP1-PERCULATE"`, `step1_folder = selection_folder`, `output_prefix = "dsem_selection_from_single_behaviour_sets"`.
-
-**Input**
-- `dsem_selection_*_single_behaviour.rds` in the selection folder (Step 2a output)
-- `dsem_step1_*.rds` or `dsem_result_*.rds` in the step1 folder (Step 1 output)
-- `CDI_data.csv` — must be present in the **current working directory**
-- Optional: a checkpoint file (`<output_prefix>_checkpoint.rds`) to resume a partial run
-
-**Output** (all saved to `selection_folder`)
-- `<output_prefix>_stacking_coefs.csv/.rds` — per-term inclusion weights
-- `<output_prefix>_stacking_weights.csv/.rds` — per-behaviour-combination stacking weights
-- `<output_prefix>.csv/.rds` — combined summary
-
-**Dependencies**
-- `cmdstanr`, `posterior`, `loo`, `dplyr`
-
----
-
-## RDS structure
-
-All Step 1 RDS files have the same structure, consumed by all downstream scripts:
-
-```
-dsem_step1_*.rds
-├── $fit         — cmdstanr CmdStanMCMC object
-├── $draws       — posterior draws_matrix (includes z_person[i,q])
-└── $prep
-    ├── $stan_data       — list passed to Stan:
-    │   ├── N, V, K, T_max, T_i
-    │   ├── Y[N, T_max, V]       — outcome array
-    │   ├── X_lag[N, T_max, K]   — lagged predictor array
-    │   ├── obs_mask[N, T_max]   — 1 = observed time point
-    │   ├── is_binary[V]         — 1 = binary outcome
-    │   ├── prior_sd_A, prior_sd_intercept, prior_sd_sigma_mu
-    │   ├── grainsize            — parallel sum grain size
-    │   ├── use_session, session_x[N, T_max]   — session option (centred indicator)
-    │   └── use_onset, y_include[N, T_max, V]  — onset option (1 = in likelihood)
-    ├── $participants    — character vector, length N
-    ├── $behaviours      — character vector, length V
-    ├── $lag_col_names   — character vector, length K
-    ├── $X_lag_center, $X_lag_scale  — centring constants (lags are 0/1, centred, not scaled; scale = 1)
-    ├── $V               — number of behaviours
-    ├── $K               — V × p (total lag columns)
-    ├── $Q               — V×K + V (parameters per person)
-    └── $options         — Step 1 options (session, onset, lag_step, ...)
-```
-
-The `z_person[i,q]` parameters encode each participant's individual VAR parameters in a non-centred form. `Q = V×K + V` decomposes as:
-- `q = 1 … V×K`: lag coefficients A[y,x,lag] (column-major: outcome varies fastest)
-- `q = V×K+1 … V×K+V`: intercepts μ[y]
-
----
-
-## Workflow
-
-```bash
-# 1. Fit the VAR model (SLURM array or single run)
-Rscript fitVAR.R $SLURM_JOB_ID
-
-# 1b. (Optional) Granger causality screening
-Rscript granger_analysis.R MODELS-STEP1/ granger_loocv \
-  array_task_id=$SLURM_ARRAY_TASK_ID array_task_count=9
-
-# 2a. Within-behaviour block selection (one SLURM task per behaviour, or all at once)
-Rscript select_terms_for_individual_behaviours.R gaze MODELS-DSEM/   # repeat for each behaviour
-
-# 2b. Two-level stacking across behaviours
-Rscript final_term_weighting.R MODELS-DSEM/ MODELS-DSEM/ dsem_selection_from_single_behaviour_sets
-```
-
-`CDI_data.csv` must be in the directory from which Steps 2a and 2b are run.
-
----
-
-## Robustness analyses added in response to review (branch `reviewer_response`)
-
-The code that produced the results reported in the resubmission is on branch
-`resubmission_results`. Everything below is optional: with no options set the
-pipeline reproduces that run exactly.
-
-**Step 1 variants** (`fitVAR.R`, set as environment variables; use a new `RUN_DIR` for each):
-
-| Option | What it does | Addresses |
+| Variable | Paper | Meaning |
 |---|---|---|
-| `STEP1_SESSION=1` | Lags built within each recording session (no lag crosses from the 11-month into the 12-month recording) and a session effect on every behaviour's intercept (population mean + child deviation) | concatenation of the two sessions |
-| `STEP1_ONSET=1` | Each behaviour is predicted only where it was absent at the previous 200 ms sample, i.e. its onset; all lags remain predictors | persistence vs transitions |
-| `STEP1_LAG_STEP=2` | Lags 400 ms apart (five lags = 2 s window instead of 1 s) | temporal resolution / window |
+| `RUN_DIR` | — | Output folder |
+| `STEP1_SESSION` | `1` | Lags within each session; session-specific intercepts |
+| `STEP1_ONSET`, `STEP1_LAG_STEP` | `0`, `1` | Other Step 1 variants (not reported) |
+| `STEP2_WEIGHTS` | `pseudobma` | Model weights in Step 2 |
+| `STEP2B_BLOCKS` | `all` | Step 2b uses every block of a group |
+| `STEP2B_GROUPING` | `target`, `source` | Group blocks by the predicted or by the preceding behaviour |
+| `STEP2B_EXCLUDE` | see above | Blocks left out of every model (several: comma-separated) |
+| `PERM_N`, `PERM_START` | see above | Shuffles to run |
+| `PERM_CHAINS`, `PERM_ITER` | `2`, `500` | MCMC per model in shuffled runs (observed runs use 4 chains) |
+| `PERM_SEED_BASE` | `20261112` | Shuffle seeds |
+| `GRANGER_BLOCK_ROWS` | `20` | Block length for the block SE |
+| `FIG1_Z`, `FIG2_WEIGHT` | `z_child`, `gain` | Figure settings |
 
-**Granger standard errors** (`granger_analysis.R`): in addition to the
-observation-level SE (`se_diff`, `z_score`), every pair now has a
-child-clustered SE (`se_diff_child`, `z_child`: pointwise ELPD differences
-summed within child, SE across the 58 children) and a block SE
-(`se_diff_block`, `z_block`: sums over blocks of `block_rows` consecutive
-modelled time points, default 20 ≈ 12 s). These allow for serial dependence
-within each child's series. Re-scoring an existing Step 1 run needs no refit.
+### Running without Slurm
 
-**Figures and tables**: `make_figures.R z=z_child` uses the chosen z for
-strong support; strong edges (z > 2) are solid and weak edges dashed
-(`show=strong` draws strong edges only). `make_tables.R` writes Table S1 (all
-72 pairs with every SE, z and the population-level effect) and Table S2 (every
-Step 2 block with its inner, group and final inclusion probabilities, its
-model-averaged effect on log vocabulary with a 90% interval and P(> 0), and
-permutation p-values when available). Table S2's effect columns need Step 2a
-output from the current `select_terms_for_individual_behaviours.R`.
-
-**Figure 2 threshold**: the original one-third cut-off is gone. By default
-Figure 2 shows every block with a final inclusion probability of at least
-0.01, with line width proportional to it (a display floor, not a test). The
-inferential statement comes from the permutation null: `permutation_null.R`
-reports the permutation-calibrated threshold (95th percentile of the largest
-final inclusion probability of any block in each permutation run) and each
-block's familywise p (`p_final_max`). When those results exist, Figure 2
-draws blocks with familywise p < .05 solid and the rest dashed;
-`threshold=perm` (`FIG2_THRESHOLD=perm`) draws only blocks above the
-calibrated threshold, and `threshold=0.333` reproduces the old figure.
-
-**Permutation null for Step 2** (`make_bridge.R`, `permutation_null.R`):
-Step 2a and 2b are repeated with the vocabulary scores shuffled across
-children (`permute_seed=`), using a small summary of the Step 1 posterior
-(`bridge=`) instead of the full draws. `permutation_null.R` compares the
-observed inclusion probabilities, the intercept-only model's weight and the
-best model's ELPD gain with their permutation distributions, including
-p-values corrected for looking at every block (`p_final_max`).
-
-**Single-block test** (`single_block_test.R`): asks, for each of the 90
-predictor blocks, whether that block alone predicts held-out vocabulary better
-than the intercept-only model (ELPD gain, leave-one-child-out), compared with
-the same statistic under the same vocabulary shuffles as the permutation runs.
-`p_single` compares a block with itself under shuffling; `p_single_max` with
-the best of all 90 blocks in each shuffle (familywise). Unlike the two-level
-inclusion probabilities, it does not depend on the block's group or on other
-blocks carrying the same information. Figure 2 uses it for its line style
-when present. Group-level evidence comes from `permutation_null.R`
-(`p_group`, `p_group_max` in Table S2).
-
-```bash
-# Re-score Granger with clustered/block SEs (no Step 1 refit), then figures + tables
-bash run_dsem_pipeline.slurm granger          # then granger_combine, granger_direction
-FIGURE=1 FIG1_Z=z_child bash run_dsem_pipeline.slurm figures
-bash run_dsem_pipeline.slurm tables
-
-# Step 2 again (needed for the model-averaged effects in Table S2)
-STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm step2a
-STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm step2b
-
-# Permutation null (same weights/blocks as the observed run)
-STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all PERM_N=100 bash run_dsem_pipeline.slurm permutations
-# More permutations at group level only (Step 2b without Step 2a; ~1/5 of the cost):
-# group and global p-values use all runs, block-level ones only runs with Step 2a
-STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all PERM_START=101 PERM_N=1000 bash run_dsem_pipeline.slurm perm_groups
-# Group-level variants (observed run + shuffles, Step 2b only; results in
-# PERMUTATIONS/permutation_null_<tag>_*):
-#   contingent-talk group without its self-lag
-STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all STEP2B_EXCLUDE=contingent.contingent PERM_N=1000 bash run_dsem_pipeline.slurm perm_groups
-#   groups defined by the PREDICTING behaviour (what each behaviour is followed by)
-STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all STEP2B_GROUPING=source PERM_N=1000 bash run_dsem_pipeline.slurm perm_groups
-# Single-block test (after the bridge exists; same shuffles)
-PERM_N=100 bash run_dsem_pipeline.slurm single_block
-
-# Step 1 variants, each in its own run folder
-RUN_DIR=/scratch/q55362cb/dsem_session STEP1_SESSION=1 \
-  STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm
-RUN_DIR=/scratch/q55362cb/dsem_onset STEP1_SESSION=1 STEP1_ONSET=1 \
-  STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm
-RUN_DIR=/scratch/q55362cb/dsem_lag2 STEP1_SESSION=1 STEP1_LAG_STEP=2 \
-  STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm
-```
+Each stage is a single Rscript call; the stage blocks near the end of
+`run_dsem_pipeline.slurm` give the exact arguments. In order:
+`fitVAR.R <chain>` (16 chains, with `STEP1_SESSION=1` set) →
+`check_convergence.R` → `granger_analysis.R` → `granger_direction.R` →
+`select_terms_for_individual_behaviours.R <behaviour>` (9 behaviours) →
+`final_term_weighting.R` → `make_bridge.R` → for each shuffle,
+`single_block_test.R fit` and `final_term_weighting.R … permute_seed=…` →
+`permutation_null.R`, `single_block_test.R summary` → `make_figures.R`,
+`make_tables.R`. `select_terms_for_individual_behaviours.R`,
+`final_term_weighting.R` and `single_block_test.R` read `CDI_data.csv` from
+the working directory.
 
 ---
 
-## R package dependencies
+## Step 1 output structure
 
-| Package | Used by |
-|---|---|
-| `cmdstanr` | fitVAR, select_terms, final_term_weighting |
-| `posterior` | fitVAR, granger_analysis, select_terms, final_term_weighting |
-| `loo` | granger_analysis, select_terms, final_term_weighting |
-| `dplyr` | fitVAR, select_terms, final_term_weighting |
-
-CmdStan ≥ 2.33 is required for Pathfinder initialisation in `fitVAR.R`.
+```
+MODELS-STEP1/dsem_step1_<chain>.rds
+├── $fit, $draws   cmdstanr fit and posterior draws (incl. z_person[i,q])
+└── $prep          stan_data, participants, behaviours, lag_col_names,
+                   V (9), K (V×5), Q (V×K + V), options (session, onset, lag_step)
+```
+In `z_person[i, q]`, `q = 1 … V·K` are the lag coefficients A[y, x, lag]
+(outcome varies fastest) and `q = V·K+1 … V·K+V` the intercepts.
