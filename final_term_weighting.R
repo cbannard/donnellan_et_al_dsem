@@ -19,20 +19,22 @@
 #   w_final(q) = outer_inclusion(behaviour(q)) × inner_inclusion(q | behaviour)
 #
 # Which model weights are summed into inclusion weights (weights= option):
-#   weights=stacking (default) — Bayesian stacking weights (Yao et al. 2018),
-#       at both levels, as described in the paper.
-#   weights=pseudobma — pseudo-BMA+ weights at both levels. Inner weights are
-#       recomputed from the Step 2a pseudo-BMA+ weights saved for every block
-#       combination; outer weights are the pseudo-BMA+ weights of the Step 2b
-#       behaviour combinations. Stacking chooses the best *mixture* of models,
-#       so with hundreds of near-equivalent models and 58 children its weights
-#       are spread almost arbitrarily and are not model probabilities;
-#       pseudo-BMA+ weights reflect each model's own cross-validated
-#       performance. With either weighting, a block that makes no difference
+#   weights=pseudobma (default; used in the paper) — pseudo-BMA+ weights at
+#       both levels. Inner weights are computed from the Step 2a pseudo-BMA+
+#       weights saved for every block combination; outer weights are the
+#       pseudo-BMA+ weights of the Step 2b behaviour combinations. They
+#       reflect each model's own cross-validated performance.
+#   weights=stacking — Bayesian stacking weights (Yao et al. 2018) at both
+#       levels. Stacking chooses the best *mixture* of models, so with
+#       hundreds of near-equivalent models and 58 children its weights are
+#       spread almost arbitrarily and are not model probabilities. With either weighting, a block that makes no difference
 #       sits near 0.5 (each block is in half of all combinations).
 #
 # Which blocks of each behaviour enter the outer search (blocks= option):
-#   blocks=min (default) — only blocks whose Step 2a inclusion weight is at
+#   blocks=all (default; used in the paper) — every block with a non-zero
+#       Step 2a inclusion weight (in practice all 10 blocks per behaviour),
+#       with the Step 2a inclusion weights as inner weights.
+#   blocks=min — only blocks whose Step 2a inclusion weight is at
 #       least min_inner (default 0.5). Their Step 2a weights stay as the
 #       inner weights, so w_final = outer x inner as described above. A
 #       behaviour with no block reaching min_inner is left out. This keeps
@@ -42,9 +44,6 @@
 #       does not beat the intercept-only model is left out. Each selected
 #       block's inner weight is set to 1, so a term's final weight is the
 #       outer inclusion weight of its behaviour.
-#   blocks=all — every block with a non-zero Step 2a inclusion weight
-#       (in practice all 10 blocks per behaviour), with the Step 2a inclusion
-#       weights as inner weights. This is the setting used in the paper.
 #
 # This gives fine-grained inclusion probabilities at the level of individual
 # x→y predictor pairs and means, without requiring an exhaustive search
@@ -105,13 +104,13 @@ selection_folder <- if (length(pos_args) >= 1) pos_args[1] else "MODELS-DSEM"
 step1_folder <- if (length(pos_args) >= 2) pos_args[2] else selection_folder
 output_prefix <- if (length(pos_args) >= 3) pos_args[3] else "dsem_selection_from_single_behaviour_sets"
 blocks_arg <- sub("^(--)?blocks=", "", grep("^(--)?blocks=", args, value = TRUE))
-block_mode <- if (length(blocks_arg)) tolower(blocks_arg[length(blocks_arg)]) else "min"
+block_mode <- if (length(blocks_arg)) tolower(blocks_arg[length(blocks_arg)]) else "all"
 if (!block_mode %in% c("min", "best", "all")) stop("blocks= must be min, best or all")
 mi_arg    <- sub("^(--)?min_inner=", "", grep("^(--)?min_inner=", args, value = TRUE))
 min_inner <- if (length(mi_arg)) as.numeric(mi_arg[length(mi_arg)]) else 0.5
 if (!is.finite(min_inner) || min_inner < 0 || min_inner > 1) stop("min_inner must be between 0 and 1")
 wt_arg      <- sub("^(--)?weights=", "", grep("^(--)?weights=", args, value = TRUE))
-weight_mode <- if (length(wt_arg)) tolower(wt_arg[length(wt_arg)]) else "stacking"
+weight_mode <- if (length(wt_arg)) tolower(wt_arg[length(wt_arg)]) else "pseudobma"
 if (!weight_mode %in% c("stacking", "pseudobma")) stop("weights= must be stacking or pseudobma")
 keyed_arg <- function(args, key, default = NA) {
   hit <- grep(paste0("^(--)?", key, "="), args, value = TRUE)

@@ -25,15 +25,14 @@
 # self-contained even if the CmdStan CSV files are later cleaned up.
 # The later stages read only $draws and $prep — they do not need $fit.
 #
-# OPTIONS (environment variables; the paper uses STEP1_SESSION=1 and the
-# defaults for the rest)
-#   STEP1_SESSION=1    Treat the 11- and 12-month recordings as separate
+# OPTIONS (environment variables; the defaults are the settings of the paper)
+#   STEP1_SESSION=1    (default) Treat the 11- and 12-month recordings as separate
 #                      series: lags are built within each session (the first
 #                      samples of a session never take lags from the end of
 #                      the other session), and each behaviour gets a session
 #                      effect on its intercept (population mean + child-level
-#                      deviation, both on the log-odds scale). Default 0: the
-#                      two sessions are concatenated into one series per child.
+#                      deviation, both on the log-odds scale). STEP1_SESSION=0:
+#                      the two sessions are concatenated into one series per child.
 #   STEP1_ONSET=1      Onset (transition) model: each behaviour is predicted
 #                      only at samples where it was absent in the previous
 #                      200 ms sample, so the model predicts the START of a
@@ -60,7 +59,7 @@ env_int <- function(name, default) {
   if (is.na(out)) stop(name, " must be an integer (got '", v, "')")
   out
 }
-opt_session   <- env_int("STEP1_SESSION", 0L) == 1L
+opt_session   <- env_int("STEP1_SESSION", 1L) == 1L
 opt_onset     <- env_int("STEP1_ONSET", 0L) == 1L
 opt_lag_step  <- env_int("STEP1_LAG_STEP", 1L)
 opt_T_sub     <- env_int("STEP1_T_SUBSAMPLE", 3165L)

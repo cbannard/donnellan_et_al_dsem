@@ -70,11 +70,8 @@ scripts while jobs from the checkout are queued or running: jobs read the R
 scripts when they start.
 
 ```bash
-# Settings used for every result in the paper
+# The defaults of every option are the settings used in the paper
 export RUN_DIR=/scratch/$USER/dsem_session
-export STEP1_SESSION=1                       # lags within each session + session intercepts
-export STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all
-export FIG1_Z=z_child FIG2_WEIGHT=gain       # Figure 1: child-clustered z; Figure 2: single-predictor gain
 export PERM_MAX_RUNNING=64                   # tasks of one array allowed to run at once
 
 # 1. Step 1, convergence, Granger (Figure 1, Table S1), Step 2a/2b, figures, tables
@@ -145,31 +142,35 @@ script.
 | `granger_analysis.R` | Step 1b | For each of the 72 directed pairs x → y, the PSIS-LOO ELPD of the full model for y minus that of the model with x's lags set to zero, with observation-level, child-clustered (used in the paper) and block (20 modelled samples ≈ 12 s) SEs. |
 | `granger_direction.R` | Step 1c | Posterior probability that the population-level x → y effect, summed over lags, is positive. |
 | `select_terms_for_individual_behaviours.R` | Step 2a | Within one behaviour group, all 1,023 combinations of its 10 predictor blocks (9 lag blocks and the mean), each an error-in-variables regression of log vocabulary on the children's posterior means with their posterior SDs; PSIS leave-one-child-out; within-group inclusion probabilities. |
-| `final_term_weighting.R` | Step 2b | All 511 combinations of behaviour groups and the intercept-only model; pseudo-BMA+ weights; group inclusion probabilities. Options include `blocks=all`, `weights=pseudobma`, `grouping=source` (group blocks by the predicting behaviour), `exclude=x.y[,…]` or `mean.y` (leave blocks out of every model), `bridge=` and `permute_seed=`. Resumes from its checkpoint if interrupted. |
+| `final_term_weighting.R` | Step 2b | All 511 combinations of behaviour groups and the intercept-only model; pseudo-BMA+ weights; group inclusion probabilities. Defaults `blocks=all`, `weights=pseudobma`; options include `grouping=source` (group blocks by the predicting behaviour), `exclude=x.y[,…]` or `mean.y` (leave blocks out of every model), `bridge=` and `permute_seed=`. Resumes from its checkpoint if interrupted. |
 | `make_bridge.R` | permutations | Per-child posterior mean and SD of every Step 2 predictor, so that permutation runs need not load the Step 1 draws. |
 | `permutation_null.R` | permutations | Compares an observed Step 2b run with its shuffled runs: group p-values (`p`, and `p_max` corrected for the nine groups), the intercept-only model's weight and the best model's ELPD. |
 | `single_block_test.R` | single-predictor test | Each of the 90 blocks alone vs the intercept-only model (ELPD gain), for the observed and the shuffled vocabulary scores; `summary` gives p, the familywise p over 90 blocks, permutation q-values, and the number and sum of positive gains. `sets=name=x.y+x.y;…` tests sets of blocks as single models instead. |
 | `run_block_sets.slurm` | joint tests | Array job for `single_block_test.R sets=…` (task 0 observed, tasks 1–10 shuffles 1–1,000). |
-| `make_figures.R` | figures | Figure 1 (`z=z_child`: strong edges solid) and Figure 2 (`weight=gain`: every predictor with a positive single-predictor gain; width = gain, colour = sign of its effect). |
+| `make_figures.R` | figures | Figure 1 (default `z=z_child`: strong edges solid) and Figure 2 (default `weight=gain`: every predictor with a positive single-predictor gain; width = gain, colour = sign of its effect). |
 | `make_tables.R` | tables | Tables S1 and S2. |
 | `monitor_progress.sh` | — | Progress of running Step 2 jobs. |
 
 ### Pipeline options (environment variables)
 
-| Variable | Paper | Meaning |
+The defaults are the settings used in the paper; the other values exist for
+checks and variants.
+
+| Variable | Default | Meaning |
 |---|---|---|
-| `RUN_DIR` | — | Output folder |
-| `STEP1_SESSION` | `1` | Lags within each session; session-specific intercepts |
+| `RUN_DIR` | `/scratch/$USER/dsem_results` | Output folder |
+| `STEP1_SESSION` | `1` | Lags within each session and session-specific intercepts (`0`: sessions concatenated) |
 | `STEP1_ONSET`, `STEP1_LAG_STEP` | `0`, `1` | Other Step 1 variants (not reported) |
-| `STEP2_WEIGHTS` | `pseudobma` | Model weights in Step 2 |
-| `STEP2B_BLOCKS` | `all` | Step 2b uses every block of a group |
-| `STEP2B_GROUPING` | `target`, `source` | Group blocks by the predicted or by the preceding behaviour |
-| `STEP2B_EXCLUDE` | see above | Blocks left out of every model (several: comma-separated) |
-| `PERM_N`, `PERM_START` | see above | Shuffles to run |
+| `STEP2_WEIGHTS` | `pseudobma` | Model weights in Step 2 (`stacking` also available) |
+| `STEP2B_BLOCKS` | `all` | Step 2b uses every block of a group (`min`, `best` also available) |
+| `STEP2B_GROUPING` | `target` | Group blocks by the predicted (`target`) or by the preceding behaviour (`source`) |
+| `STEP2B_EXCLUDE` | none | Blocks left out of every model (several: comma-separated) |
+| `PERM_N`, `PERM_START` | `100`, `1` | Shuffles to run (the paper's numbers are in the commands above) |
 | `PERM_CHAINS`, `PERM_ITER` | `2`, `500` | MCMC per model in shuffled runs (observed runs use 4 chains) |
 | `PERM_SEED_BASE` | `20261112` | Shuffle seeds |
 | `GRANGER_BLOCK_ROWS` | `20` | Block length for the block SE |
-| `FIG1_Z`, `FIG2_WEIGHT` | `z_child`, `gain` | Figure settings |
+| `FIG1_Z`, `FIG2_WEIGHT` | `z_child`, `gain` | Figure 1: child-clustered z; Figure 2: single-predictor gain |
+| `PERM_MAX_RUNNING` | `100` | Tasks of one array allowed to run at once (cluster only) |
 
 ### Running without Slurm
 
@@ -207,8 +208,6 @@ at once (each uses one CPU), so check the memory column before raising it.
 ```bash
 cd donnellan_et_al_dsem
 export REPO_DIR=$PWD RUN_DIR=$HOME/dsem_run
-export STEP1_SESSION=1 STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all
-export FIG1_Z=z_child FIG2_WEIGHT=gain
 export SLURM_JOB_ID=local          # run stages here; never set this when submitting to Slurm
 JOBS=4
 

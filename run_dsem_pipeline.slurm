@@ -49,8 +49,8 @@
 # later with PERM_START and PERM_N. Do not edit or update the scripts while
 # jobs are queued or running: each job reads the R scripts when it starts.
 #
-# OPTIONS are environment variables, listed with their defaults in the
-# configuration block below; README.md lists the values used in the paper.
+# OPTIONS are environment variables, listed in the configuration block below.
+# Their defaults are the settings used in the paper.
 # Step 1 options (STEP1_SESSION, STEP1_ONSET, STEP1_LAG_STEP) are recorded in
 # $RUN_DIR/step1_options.txt, and a run folder cannot mix them. Variants of the
 # group-level test (STEP2B_GROUPING, STEP2B_EXCLUDE) write files tagged with
@@ -92,21 +92,21 @@ MEM_GRANGER="${MEM_GRANGER:-512G}"   # each shard loads all Step 1 chains
 MEM_STEP2="${MEM_STEP2:-256G}"       # steps 2a/2b load all step-1 files at once
 MEM_CONV="${MEM_CONV:-128G}"         # convergence check holds all chains' draws
 
-STEP2B_BLOCKS="${STEP2B_BLOCKS:-min}"    # step2b: which Step 2a blocks enter (min | best | all)
+STEP2B_BLOCKS="${STEP2B_BLOCKS:-all}"    # step2b: which Step 2a blocks enter (all | min | best)
 STEP2B_MIN_INNER="${STEP2B_MIN_INNER:-0.5}"  # step2b: inclusion-weight cut-off for blocks=min
-STEP2_WEIGHTS="${STEP2_WEIGHTS:-stacking}"     # step2b: stacking or pseudobma model weights
+STEP2_WEIGHTS="${STEP2_WEIGHTS:-pseudobma}"    # step2b: pseudobma or stacking model weights
 FIGURE="${FIGURE:-both}"             # figures stage: 1, 2 or both
 FIG1_RULE="${FIG1_RULE:-mean}"       # Figure 1 positive rule: mean or pop
 FIG1_PROB="${FIG1_PROB:-0.95}"       # probability cut-off when FIG1_RULE=pop
-FIG1_Z="${FIG1_Z:-z_score}"          # Figure 1 z: z_score | z_child | z_block
-FIG2_WEIGHT="${FIG2_WEIGHT:-inclusion}" # Figure 2 links: inclusion (two-level) | gain | perm
-                                      #   (gain/perm: single-block evidence; needs single_block)
+FIG1_Z="${FIG1_Z:-z_child}"          # Figure 1 z: z_child | z_score | z_block
+FIG2_WEIGHT="${FIG2_WEIGHT:-gain}"   # Figure 2 links: gain | perm (single-predictor test; drawn
+                                      #   once single_block has run) | inclusion (two-level)
 FIG2_MIN_GAIN="${FIG2_MIN_GAIN:-0}"  # Figure 2 with gain/perm: minimum ELPD gain to draw a link
 FIG2_THRESHOLD="${FIG2_THRESHOLD:-0.01}" # Figure 2 blocks drawn: 0.01 = all with non-negligible
                                       #   weight; perm = permutation-calibrated threshold;
                                       #   or a number
 FIG1_SHOW="${FIG1_SHOW:-all}"        # Figure 1: all (weak edges dashed) | strong
-STEP1_SESSION="${STEP1_SESSION:-0}"  # Step 1 options, see fitVAR.R (paper: STEP1_SESSION=1)
+STEP1_SESSION="${STEP1_SESSION:-1}"  # Step 1 options, see fitVAR.R
 STEP1_ONSET="${STEP1_ONSET:-0}"
 STEP1_LAG_STEP="${STEP1_LAG_STEP:-1}"
 GRANGER_BLOCK_ROWS="${GRANGER_BLOCK_ROWS:-20}"  # rows per block for the block SE
@@ -235,8 +235,8 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
       echo "This RUN_DIR was used with Step 1 options '$(cat "$opts_file")', not '$opts'." >&2
       echo "Use a new RUN_DIR for a different Step 1 variant." >&2; exit 1
     fi
-    if [[ ! -f "$opts_file" ]] && compgen -G "$STEP1_DIR/dsem_step1_*.rds" >/dev/null && [[ "$opts" != "session=0 onset=0 lag_step=1" ]]; then
-      echo "$STEP1_DIR already holds Step 1 fits made without options; use a new RUN_DIR for '$opts'." >&2; exit 1
+    if [[ ! -f "$opts_file" ]] && compgen -G "$STEP1_DIR/dsem_step1_*.rds" >/dev/null; then
+      echo "$STEP1_DIR holds Step 1 fits but no record of their options; use a new RUN_DIR." >&2; exit 1
     fi
     echo "$opts" > "$opts_file"
     echo "Step 1 options: $opts"

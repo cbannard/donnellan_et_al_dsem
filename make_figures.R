@@ -30,7 +30,7 @@
 #                  p_single_max < alpha) if present, otherwise the two-level
 #                  results (p_final_max and p_inner both < alpha)
 #   alpha=         significance level for perm (default 0.05)
-#   weight=        what Figure 2's links show (default inclusion):
+#   weight=        what Figure 2's links show (default gain, as in the paper):
 #                    inclusion — final inclusion probability (two-level model
 #                                averaging); blocks chosen by threshold=
 #                    gain — strength of evidence from the single-block test
@@ -51,9 +51,9 @@
 #                           with P(effect > 0) >= prob; needs granger_direction.R output
 #   prob=          probability cut-off for rule=pop (default 0.95)
 #   z=             which z-score sets "strong support" (z > 2), arrow width
-#                  and colour: z_score (default; observation-level SE),
-#                  z_child (child-clustered SE; used in the paper) or
-#                  z_block (block SE)
+#                  and colour: z_child (default; child-clustered SE, as in
+#                  the paper), z_score (observation-level SE) or z_block
+#                  (block SE)
 #   show=          all (default): every edge passing the rule, strong edges
 #                  (z > 2) solid and the others dashed; strong: strong edges only
 #
@@ -64,21 +64,22 @@
 #   is positive. Arrow width and colour show the z-score (ELPD difference /
 #   its SE); z > 2 is "strong support".
 #
-# Figure 2 (Step 2b, final_term_weighting.R)
-#   Input: MODELS-STEP1/dsem_selection_from_single_behaviour_sets_stacking_coefs.csv
-#   An arrow x -> y for every lag block A[y, x, lags 1-5] whose final
-#   inclusion weight is >= threshold (self-lags as loops); red = higher
-#   vocabulary, blue = lower. Arrow width shows the inclusion weight. A
-#   coloured ring round a node means that behaviour's mean (intercept) is
-#   included, coloured by direction. This is weight=inclusion; the paper's
-#   Figure 2 uses weight=gain (see weight= above).
+# Figure 2 (single_block_test.R; weight=gain, the default)
+#   Input: PERMUTATIONS/single_block_null.csv
+#   An arrow x -> y for every lag block A[y, x, lags 1-5] that on its own
+#   improves leave-one-child-out prediction of vocabulary (self-lags as
+#   loops); arrow width = ELPD gain over the intercept-only model; red =
+#   higher vocabulary, blue = lower. A ring round a node shows the evidence
+#   for that behaviour's mean rate. With weight=inclusion the input is instead
+#   MODELS-STEP1/dsem_selection_from_single_behaviour_sets_stacking_coefs.csv
+#   and arrows show final inclusion weights >= threshold.
 #
 # Outputs (in output_folder): figure1_granger_network.{pdf,png},
 #   figure2_vocabulary_network.{pdf,png}, and CSVs of exactly what was drawn.
 # =============================================================================
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 1) stop("Usage: Rscript make_figures.R <run_dir> [output_folder] [figure=1|2|both] [threshold=0.333]")
+if (length(args) < 1) stop("Usage: Rscript make_figures.R <run_dir> [output_folder] [figure=1|2|both] [weight=gain|inclusion|perm] [z=z_child|z_score|z_block]")
 keyed     <- args[grepl("=", args)]
 pos_args  <- args[!grepl("=", args)]
 run_dir   <- pos_args[1]
@@ -92,7 +93,7 @@ perm_arg  <- sub("^perm=", "", keyed[grepl("^perm=", keyed)])
 perm_mode <- if (length(perm_arg)) tolower(perm_arg[length(perm_arg)]) else "0"
 if (!perm_mode %in% c("auto", "0", "1")) stop("perm= must be auto, 0 or 1")
 w2_arg    <- sub("^weight=", "", keyed[grepl("^weight=", keyed)])
-fig2_weight <- if (length(w2_arg)) tolower(w2_arg[length(w2_arg)]) else "inclusion"
+fig2_weight <- if (length(w2_arg)) tolower(w2_arg[length(w2_arg)]) else "gain"
 if (!fig2_weight %in% c("inclusion", "gain", "perm")) stop("weight= must be inclusion, gain or perm")
 mg_arg    <- sub("^min_gain=", "", keyed[grepl("^min_gain=", keyed)])
 fig2_min_gain <- if (length(mg_arg)) as.numeric(mg_arg) else 0
@@ -109,7 +110,7 @@ if (!fig1_rule %in% c("mean", "pop")) stop("rule= must be mean or pop")
 prob_arg  <- sub("^prob=", "", keyed[grepl("^prob=", keyed)])
 fig1_prob <- if (length(prob_arg)) as.numeric(prob_arg) else 0.95
 z_arg     <- sub("^z=", "", keyed[grepl("^z=", keyed)])
-fig1_z    <- if (length(z_arg)) z_arg[length(z_arg)] else "z_score"
+fig1_z    <- if (length(z_arg)) z_arg[length(z_arg)] else "z_child"
 if (!fig1_z %in% c("z_score", "z_child", "z_block")) stop("z= must be z_score, z_child or z_block")
 show_arg  <- sub("^show=", "", keyed[grepl("^show=", keyed)])
 fig1_show <- if (length(show_arg)) tolower(show_arg[length(show_arg)]) else "all"
@@ -307,6 +308,10 @@ if (!do_fig1) {
 # =============================================================================
 if (!do_fig2) {
   message("Figure 2 not requested (figure=", which_fig, ")")
+} else if (fig2_weight != "inclusion" &&
+           !file.exists(file.path(run_dir, "PERMUTATIONS", "single_block_null.csv"))) {
+  message("Figure 2 skipped: weight=", fig2_weight, " needs PERMUTATIONS/single_block_null.csv ",
+          "(run the single_block stage; it redraws Figure 2 when it finishes)")
 } else if (file.exists(coefs_csv)) {
   sb_csv <- file.path(run_dir, "PERMUTATIONS", "single_block_null.csv")
   if (fig2_weight != "inclusion") {
