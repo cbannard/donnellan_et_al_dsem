@@ -29,7 +29,9 @@
 #                                           group-level test: Step 2b on the observed
 #                                           data (task 0) and PERM_N shuffles, then
 #                                           a summary
-#   group_tests        single_block and perm_groups together
+#   offshot            offshot_check.R      off-shot and padding: amounts per child and
+#                                           their relation to the Step 2 predictors
+#   group_tests        single_block, perm_groups and offshot together
 #   permutations       as perm_groups, but repeating Step 2a in every shuffle
 #                                           (not used in the paper)
 #
@@ -67,6 +69,7 @@
 #   PERMUTATIONS/single_block_null.csv, _report.txt     single-predictor test
 #   PERMUTATIONS/permutation_null[_<tag>]_*.csv, _report.txt  group-level tests
 #   PERMUTATIONS/perm_<k>/                              shuffled runs
+#   OFFSHOT/offshot_report.txt (+ CSVs)                 off-shot and padding check
 #   FIGURES/figure1_granger_network.{pdf,png}           Figure 1 (+ figure1_edges.csv)
 #   FIGURES/figure2_vocabulary_network.{pdf,png}        Figure 2 (+ figure2_terms.csv)
 #   TABLES/table_S1_granger_pairs.csv, table_S2_step2_blocks.csv
@@ -307,8 +310,14 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     fi
   }
   bridge_dep() { [[ -n "$JB_AUTO" ]] && echo "--dependency=afterok:$JB_AUTO"; }
-  if [[ "$WHAT" == group_tests || "$WHAT" == single_block || "$WHAT" == perm_groups ]]; then
+  if [[ "$WHAT" == group_tests || "$WHAT" == single_block || "$WHAT" == perm_groups || "$WHAT" == offshot ]]; then
     ensure_bridge
+  fi
+
+  # ---- off-shot and padding check (needs the bridge file) ----
+  if [[ "$WHAT" == offshot || "$WHAT" == group_tests ]]; then
+    JOS=$(submit_stage offshot -J dsem_offshot -t 0-1 --mem=8G $(bridge_dep) -o "$LOG_DIR/offshot.out")
+    echo "Off-shot and padding check:                 job $JOS"
   fi
 
   # ---- single-block permutation test (needs the bridge file) ----
@@ -555,6 +564,13 @@ perm2b_only)
     grouping="$STEP2B_GROUPING" ${STEP2B_EXCLUDE:+exclude=${STEP2B_EXCLUDE//+/,}}
   ;;
 
+offshot)
+  banner "offshot_check.R"
+  load_r
+  cd "$REPO_DIR"                 # script reads ./CDI_data.csv
+  Rscript "$REPO_DIR/offshot_check.R" "$RUN_DIR" data="$DATA_DIR"
+  ;;
+
 perm_summary)
   banner "permutation_null.R"
   load_r
@@ -572,7 +588,7 @@ step2b)
   ;;
 
 *)
-  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | granger_direction | step2a | step2b | figures | tables | permutations | bridge | perm2a | perm2b | perm_summary | single_block | sb_summary | perm_groups | group_tests" >&2
+  echo "Unknown stage '$STAGE'. Use: submit | step1 | convergence | granger | granger_combine | granger_direction | step2a | step2b | figures | tables | permutations | bridge | perm2a | perm2b | perm_summary | single_block | sb_summary | perm_groups | group_tests | offshot" >&2
   exit 1
   ;;
 esac

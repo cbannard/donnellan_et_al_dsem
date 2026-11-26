@@ -33,8 +33,10 @@ of the version first submitted for review.
   first nine rows are, in order, `contingent` (caregiver semantically
   contingent talk), `gaze` (infant gaze to the caregiver's face), `CV`,
   `non_CV` (vocalisations), `index_point`, `open_point`, `give`, `show` and
-  `other_gesture`; the two remaining rows are not used. The coding scheme is
-  described in the paper.
+  `other_gesture`. Row 10 marks samples when the dyad was off-shot and row 11
+  the padding; all nine behaviours are 0 in those samples. The model does not
+  use rows 10 and 11; `offshot_check.R` does. The coding scheme is described
+  in the paper.
 - **`CDI_data.csv`**: `participant`, `us18_imp`, the expressive vocabulary
   (Lincoln CDI) at 18 months, with missing values imputed from all available
   CDI measures by predictive mean matching (`mice`), as described in the paper.
@@ -96,12 +98,15 @@ sbatch --array=0-10 -o $RUN_DIR/logs/block_sets_%a.out run_block_sets.slurm
 #    when all 11 tasks have finished:
 Rscript single_block_test.R summary $RUN_DIR sets=x set_tag=responses
 
-# 5. Redraw Figure 2 and the tables once everything has finished
+# 5. Off-shot and padding check (Step 2 Results; a few minutes)
+bash run_dsem_pipeline.slurm offshot
+
+# 6. Redraw Figure 2 and the tables once everything has finished
 FIGURE=2 bash run_dsem_pipeline.slurm figures
 bash run_dsem_pipeline.slurm tables
 ```
 
-Stages 2–4 can be submitted together after stage 1 has finished; they wait for
+Stages 2–5 can be submitted together after stage 1 has finished; they wait for
 the bridge file (`PERMUTATIONS/bridge.rds`, a per-child summary of the Step 1
 posterior), which the first of them creates. A summary job runs after each
 array. To re-run one by hand, use `Rscript permutation_null.R $RUN_DIR <prefix>`,
@@ -128,6 +133,7 @@ script.
 | Group and within-group inclusion probabilities, model ELPDs | `MODELS-STEP1/dsem_selection_from_single_behaviour_sets*_stacking_weights.csv`, `TABLES/table_S2_step2_blocks.csv` |
 | Group-level p-values (main analyses and reduced groups) | `PERMUTATIONS/permutation_null[_<tag>]_report.txt`, tags `src`, `excl_contingent_contingent`, `src_excl_contingent_contingent`, `excl_contingent_contingent_mean_contingent`, `src_excl_contingent_contingent_mean_contingent` |
 | Joint tests of contingent responses | `PERMUTATIONS/block_sets_responses_report.txt` |
+| Off-shot and padding: shares of the data, on-shot time, correlations with the predictors and coefficients with and without controls (Data section, Step 2 Results) | `OFFSHOT/offshot_report.txt`, `OFFSHOT/offshot_children.csv`, `OFFSHOT/offshot_predictors.csv` |
 | Table S2 | `TABLES/table_S2_step2_blocks.csv` (the `final_inclusion`, `p_inner`, `p_final` and `p_final_max` columns are not used for this model) |
 
 ---
@@ -146,6 +152,7 @@ script.
 | `make_bridge.R` | permutations | Per-child posterior mean and SD of every Step 2 predictor, so that permutation runs need not load the Step 1 draws. |
 | `permutation_null.R` | permutations | Compares an observed Step 2b run with its shuffled runs: group p-values (`p`, and `p_max` corrected for the nine groups), the intercept-only model's weight and the best model's ELPD. |
 | `single_block_test.R` | single-predictor test | Each of the 90 blocks alone vs the intercept-only model (ELPD gain), for the observed and the shuffled vocabulary scores; `summary` gives p, the familywise p over 90 blocks, permutation q-values, and the number and sum of positive gains. `sets=name=x.y+x.y;…` tests sets of blocks as single models instead. |
+| `offshot_check.R` | off-shot check | Share of off-shot and padded samples (rows 10 and 11 of each data file) overall and per child, coded on-shot time, and for selected Step 2 predictors (default: the contingent-talk self-lag, CV → contingent, non-CV → contingent, mean rate of contingent talk) their correlations with off-shot share and on-shot time and their association with log vocabulary (per SD of the predictor) without and with both as covariates. |
 | `run_block_sets.slurm` | joint tests | Array job for `single_block_test.R sets=…` (task 0 observed, tasks 1–10 shuffles 1–1,000). |
 | `make_figures.R` | figures | Figure 1 (default `z=z_child`: strong edges solid) and Figure 2 (default `weight=gain`: every predictor with a positive single-predictor gain; width = gain, colour = sign of its effect). |
 | `make_tables.R` | tables | Tables S1 and S2. |
@@ -236,8 +243,9 @@ stage granger_direction 0
 tasks step2a 0 8
 stage step2b 0
 
-# 4. Per-child summaries used by all permutation runs
+# 4. Per-child summaries used by the permutation runs and the off-shot check
 stage bridge 0
+stage offshot 0                                        # OFFSHOT/offshot_report.txt
 
 # 5. Single-predictor test: observed (0) + 1,000 shuffles
 tasks sb_fit 0 1000
