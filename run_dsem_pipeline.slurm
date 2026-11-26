@@ -231,8 +231,12 @@ BRIDGE_FILE="$PERM_DIR/bridge.rds"
 LOG_DIR="$RUN_DIR/logs"
 
 load_r() {
-  module purge
-  module load "$R_MODULE"
+  # Environment modules are used only where they exist (not on a laptop or
+  # workstation); R_MODULE=none skips them too.
+  if [[ "$R_MODULE" != none ]] && command -v module >/dev/null 2>&1; then
+    module purge
+    module load "$R_MODULE"
+  fi
   export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 }
 

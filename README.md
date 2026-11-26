@@ -46,8 +46,9 @@ Statement).
 
 ## Requirements
 
-- A Slurm cluster. `run_dsem_pipeline.slurm` submits every stage as its own job
-  with dependencies. Its settings (partition `himem`, module
+- A Slurm cluster, or one large machine (see
+  [Running without Slurm](#running-without-slurm)). `run_dsem_pipeline.slurm`
+  submits every stage as its own job with dependencies. Its settings (partition `himem`, module
   `apps/gcc/R/4.4.2`) are those of the University of Manchester CSF3 and can be
   changed at the top of the script (`PARTITION`, `R_MODULE`).
 - R 4.4.2 with `cmdstanr`, `posterior`, `loo`, `dplyr` and `ggplot2`
@@ -171,17 +172,107 @@ script.
 
 ### Running without Slurm
 
-Each stage is a single Rscript call; the stage blocks near the end of
-`run_dsem_pipeline.slurm` give the exact arguments. In order:
-`fitVAR.R <chain>` (16 chains, with `STEP1_SESSION=1` set) →
-`check_convergence.R` → `granger_analysis.R` → `granger_direction.R` →
-`select_terms_for_individual_behaviours.R <behaviour>` (9 behaviours) →
-`final_term_weighting.R` → `make_bridge.R` → for each shuffle,
-`single_block_test.R fit` and `final_term_weighting.R … permute_seed=…` →
-`permutation_null.R`, `single_block_test.R summary` → `make_figures.R`,
-`make_tables.R`. `select_terms_for_individual_behaviours.R`,
-`final_term_weighting.R` and `single_block_test.R` read `CDI_data.csv` from
-the working directory.
+Slurm only schedules the work: every stage is an ordinary `Rscript` call, and
+the pipeline script can run any stage on the current machine instead of
+submitting it. Set `SLURM_JOB_ID` to any value (this tells the script to run a
+stage rather than submit one), `STAGE` to the stage and `SLURM_ARRAY_TASK_ID`
+to the task. Environment modules are used only where they exist. This runs
+exactly the commands, arguments and seeds of the cluster jobs.
+
+**What one machine needs.** Linux or macOS with `bash` and `unzip`, plus R and
+CmdStan as above. The cluster jobs requested these resources; they are what
+was requested, not measured peaks:
+
+| Stage | Tasks | Memory requested | Time per task (one CPU) |
+|---|---|---|---|
+| Step 1 (`step1`) | 16 chains | not set (cluster default) | several hours to a day; ~1.7 GB output each, ~1 GB temporary |
+| Granger (`granger`) | 9 shards | 512 GB | a few hours |
+| Step 2a / 2b (`step2a`, `step2b`) | 9 + 1 | 256 GB | a few hours |
+| Convergence | 1 | 128 GB | short |
+| Bridge | 1 | 64 GB | short |
+| Single-predictor test (`sb_fit`) | 1,001 | 8 GB | ~6 min |
+| Group-level tests (`perm2b_only`) | 201 per analysis × 6 | 16 GB | ~5.5 h |
+
+Steps 1–2 (Figure 1, Table S1, the inclusion probabilities) are feasible on a
+workstation with a few hundred GB of memory, or on a cloud instance of that
+size. The single-predictor test is about 100 CPU-hours. The six group-level
+analyses at 200 shuffles are about 6,600 CPU-hours, the main cost of
+replication; with fewer shuffles (smaller `N` below) they run faster but give
+less precise p-values (the smallest attainable p is 1/(N + 1)).
+
+**Commands.** Run from a checkout of `main`; `JOBS` is the number of tasks run
+at once (each uses one CPU), so check the memory column before raising it.
+
+```bash
+cd donnellan_et_al_dsem
+export REPO_DIR=$PWD RUN_DIR=$HOME/dsem_run
+export STEP1_SESSION=1 STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all
+export FIG1_Z=z_child FIG2_WEIGHT=gain
+export SLURM_JOB_ID=local          # run stages here; never set this when submitting to Slurm
+JOBS=4
+
+# Folder layout and data (the submission step does this on a cluster)
+mkdir -p $RUN_DIR/{MODELS-STEP1,GRANGER,PERMUTATIONS,logs,tmp}
+unzip -q data_full.zip -x '__MACOSX/*' -d $RUN_DIR     # 116 CSV files
+ln -sfn $RUN_DIR/data_full $RUN_DIR/MODELS-STEP1/data_full
+echo "session=1 onset=0 lag_step=1" > $RUN_DIR/step1_options.txt
+
+# stage <name> <task>: run one task, log to $RUN_DIR/logs/<name>_<task>.out
+stage() { STAGE=$1 SLURM_ARRAY_TASK_ID=$2 bash "$REPO_DIR/run_dsem_pipeline.slurm" \
+            > "$RUN_DIR/logs/$1_$2.out" 2>&1 || echo "FAILED: $1 $2 (see log)"; }
+export -f stage
+tasks() { seq "$2" "$3" | xargs -P "$JOBS" -I{} bash -c "stage $1 {}"; }   # tasks <stage> <first> <last>
+
+# 1. Step 1: 16 chains (seed = chain number)
+tasks step1 1 16
+stage convergence 0                                    # CONVERGENCE/convergence_report.txt
+
+# 2. Granger tests (Figure 1, Table S1)
+tasks granger 1 9
+stage granger_combine 0
+stage granger_direction 0
+
+# 3. Step 2a (9 behaviour groups), then Step 2b
+tasks step2a 0 8
+stage step2b 0
+
+# 4. Per-child summaries used by all permutation runs
+stage bridge 0
+
+# 5. Single-predictor test: observed (0) + 1,000 shuffles
+tasks sb_fit 0 1000
+stage sb_summary 0
+
+# 6. Group-level tests: six analyses, observed (0) + N shuffles each
+N=200
+for v in "target|" "source|" "target|contingent.contingent" "source|contingent.contingent" \
+         "target|contingent.contingent,mean.contingent" "source|contingent.contingent,mean.contingent"; do
+  export STEP2B_GROUPING=${v%%|*} STEP2B_EXCLUDE=${v#*|}
+  tasks perm2b_only 0 $N               # task 0 of the main analysis reuses step 3's output
+  stage perm_summary 0
+done
+unset STEP2B_GROUPING STEP2B_EXCLUDE
+
+# 7. Joint tests of contingent responses (observed + 1,000 shuffles)
+SETS="vocal_responses=CV.contingent+non_CV.contingent;all_responses=CV.contingent+gaze.contingent+give.contingent+index_point.contingent+non_CV.contingent+open_point.contingent+other_gesture.contingent+show.contingent"
+Rscript single_block_test.R fit $RUN_DIR 0-1000 sets="$SETS" set_tag=responses chains=4 iter=500
+Rscript single_block_test.R summary $RUN_DIR sets="$SETS" set_tag=responses
+
+# 8. Figures and tables
+stage figures 0
+stage tables 0
+```
+
+Every stage skips work whose output already exists, so an interrupted run can be
+restarted by repeating the same commands. Logs of the six group-level analyses
+share names (`perm2b_only_<k>.out`); the reports
+(`PERMUTATIONS/permutation_null[_<tag>]_report.txt`) are separate. Step 7 runs
+in one process; split the range (e.g. `1-500` and `501-1000`) to run it in
+parallel. The cluster setting `PERM_MAX_RUNNING` has no effect here.
+
+To check the installation before the full run, fit a short Step 1 in a separate
+`RUN_DIR` with `STEP1_N_CHILDREN=5 STEP1_ITER_WARMUP=100
+STEP1_ITER_SAMPLING=100` set; its results are not meaningful.
 
 ---
 
