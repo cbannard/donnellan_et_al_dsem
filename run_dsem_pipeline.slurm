@@ -2,157 +2,80 @@
 # =============================================================================
 # run_dsem_pipeline.slurm
 #
-# Runs the full Study 1 (DSEM) pipeline from the donnellan_et_al_dsem repo
-# (Donnellan et al., Phil. Trans. R. Soc. B, RSTB-2025-0407):
+# Runs the Study 1 (DSEM) analyses of Donnellan et al., "Identifying behaviour
+# sequences that predict language development with time series analysis of
+# infant-caregiver interaction" (Phil. Trans. R. Soc. B, RSTB-2025-0407) on a
+# Slurm cluster. README.md gives the exact commands and settings used for
+# every result in the paper, and how to run the stages without Slurm.
 #
-#   Step 1   fitVAR.R                                 16 single-chain fits (1000 warmup + 1000 draws each)
-#   Check    check_convergence.R                      R-hat, ESS, divergences, per-chain checks
-#   Step 1b  granger_analysis.R                       Figure 1 / 72 directed pairs
-#   Step 1c  granger_direction.R                      population-level direction of each pair
-#   Step 2a  select_terms_for_individual_behaviours.R one task per behaviour
-#   Step 2b  final_term_weighting.R                   Figure 2 inclusion weights
-#   Figures  make_figures.R                           Figures 1 and 2 (network plots)
-#   Tables   make_tables.R                            Supplementary tables S1 (Granger) and S2 (Step 2)
+# STAGES
+#   step1              fitVAR.R             16 single-chain fits of the multilevel
+#                                           logistic VAR(5) (seed = chain number)
+#   convergence        check_convergence.R  R-hat, ESS, divergences, per-chain checks
+#   granger            granger_analysis.R   ELPD test of each of the 72 directed
+#                                           pairs (9 shards, one per outcome)
+#   granger_combine    (R code below)       joins the shards
+#   granger_direction  granger_direction.R  population-level direction of each pair
+#   step2a             select_terms_for_individual_behaviours.R
+#                                           model search within each behaviour group
+#   step2b             final_term_weighting.R  model search across groups
+#   figures, tables    make_figures.R, make_tables.R
+#   bridge             make_bridge.R        per-child Step 1 summaries used by the
+#                                           permutation stages
+#   single_block       single_block_test.R  each predictor alone against the
+#                                           intercept-only model, observed and
+#                                           PERM_N shuffles, then a summary
+#   perm_groups        final_term_weighting.R, permutation_null.R
+#                                           group-level test: Step 2b on the observed
+#                                           data (task 0) and PERM_N shuffles, then
+#                                           a summary
+#   group_tests        single_block and perm_groups together
+#   permutations       as perm_groups, but repeating Step 2a in every shuffle
+#                                           (not used in the paper)
 #
-#   Permutation null for Step 2 (run separately, see below):
-#   Bridge   make_bridge.R                            children's Step 1 posterior means/SDs, once
-#   Perm 2a  select_terms_for_individual_behaviours.R PERM_N x 9 tasks, vocabulary shuffled
-#   Perm 2b  final_term_weighting.R                   PERM_N tasks
-#   Summary  permutation_null.R                       p-values against the permutation null
-#
-# HOW TO RUN
-#   Put this file in the donnellan_et_al_dsem/ folder (next to fitVAR.R and
-#   data_full.zip) on the cluster, then from a login node run:
-#
-#       bash run_dsem_pipeline.slurm
-#
-#   (use "bash", not "sbatch"). The script checks the setup, then submits every
-#   stage as its own Slurm job, with dependencies so that each stage starts
-#   only after the stages it needs have finished successfully:
+# USAGE (from a login node, in the repository folder)
+#   bash run_dsem_pipeline.slurm             submit step1 ... tables, with dependencies
+#   bash run_dsem_pipeline.slurm <stage>     submit one stage
+# Use "bash", not "sbatch": the script submits the jobs itself.
 #
 #       step1 (array 1-16)  ──┬── convergence
-#                             ├── granger (array) ── granger_combine ──┬── granger_direction
-#                             │                                         │
-#                             └── step2a  (array 0-8) ── step2b ───────┴── figures ── tables
+#                             ├── granger (array 1-9) ── granger_combine ──┬── granger_direction
+#                             │                                            │
+#                             └── step2a (array 0-8) ── step2b ────────────┴── figures ── tables
 #
-#   To re-run a single stage (e.g. after fixing a failure):
+# The permutation stages need the bridge file, which the first of them makes.
+# Every stage skips tasks whose output already exists, so resubmitting a stage
+# reruns only missing or failed tasks, and shuffles can be added to an analysis
+# later with PERM_START and PERM_N. Do not edit or update the scripts while
+# jobs are queued or running: each job reads the R scripts when it starts.
 #
-#       bash run_dsem_pipeline.slurm step2a        # also: step1, convergence,
-#                                               #   granger, granger_combine, granger_direction,
-#                                               #   step2b, figures
+# OPTIONS are environment variables, listed with their defaults in the
+# configuration block below; README.md lists the values used in the paper.
+# Step 1 options (STEP1_SESSION, STEP1_ONSET, STEP1_LAG_STEP) are recorded in
+# $RUN_DIR/step1_options.txt, and a run folder cannot mix them. Variants of the
+# group-level test (STEP2B_GROUPING, STEP2B_EXCLUDE) write files tagged with
+# the variant, e.g. PERMUTATIONS/permutation_null_src_report.txt.
 #
-#   Step 2 seeds: by default each Step 2 job draws a random seed and records
-#   it (log + output .rds). To reproduce a run:  STEP2_SEED=12345 bash run_dsem_pipeline.slurm step2b
-#
-#   Step 2b keeps, for each behaviour, only blocks whose Step 2a inclusion
-#   weight is >= 0.5. Change with e.g.  STEP2B_MIN_INNER=0.4 bash run_dsem_pipeline.slurm step2b
-#   (or STEP2B_BLOCKS=best / all for the other block-selection modes).
-#   Use pseudo-BMA+ instead of stacking weights at both levels with
-#       STEP2_WEIGHTS=pseudobma STEP2B_MIN_INNER=0.6 bash run_dsem_pipeline.slurm step2b
-#
-#   Figures can be drawn one at a time:  FIGURE=1 bash run_dsem_pipeline.slurm figures
-#   Figure 1 with the population-level positive rule (needs granger_direction):
-#       FIGURE=1 FIG1_RULE=pop FIG1_PROB=0.95 bash run_dsem_pipeline.slurm figures
-#
-#   Step 1 skips chains whose dsem_step1_<n>.rds already exists, so
-#   re-submitting step1 only reruns missing or failed chains.
-#
-# REVIEWER ROBUSTNESS ANALYSES
-#   Step 1 options (see fitVAR.R; the revised paper uses STEP1_SESSION=1,
-#   the defaults reproduce the original submission). Use a
-#   NEW RUN_DIR for each variant - the script refuses to mix options in one:
-#     STEP1_SESSION=1   lags built within each session + session intercepts
-#     STEP1_ONSET=1     predict behaviour onsets only (transition model)
-#     STEP1_LAG_STEP=2  lags 400 ms apart (2 s window)
-#   e.g. the recommended rerun:
-#     RUN_DIR=/scratch/q55362cb/dsem_session STEP1_SESSION=1 \
-#       STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm
-#     RUN_DIR=/scratch/q55362cb/dsem_onset STEP1_SESSION=1 STEP1_ONSET=1 \
-#       bash run_dsem_pipeline.slurm step1      (then granger etc. as needed)
-#
-#   Granger SEs: granger_analysis.R now also reports child-clustered and block
-#   SEs/z-scores (z_child, z_block). Re-score an existing Step 1 run without
-#   refitting:   bash run_dsem_pipeline.slurm granger      (then granger_combine,
-#   granger_direction, figures, tables). Block length: GRANGER_BLOCK_ROWS=20.
-#   Figure 1 with strong (z > 2) edges solid and weak edges dashed, using the
-#   child-clustered z:   FIGURE=1 FIG1_Z=z_child bash run_dsem_pipeline.slurm figures
-#   (FIG1_SHOW=strong draws only the strong edges).
-#
-#   Figure 2 no longer uses the paper's arbitrary 1/3 cut-off: by default it
-#   draws every block with final inclusion >= 0.01, line width = inclusion.
-#   FIG2_THRESHOLD=perm draws only blocks above the permutation-calibrated
-#   threshold (95th percentile of the largest final inclusion in the
-#   permutation runs); FIG2_THRESHOLD=0.333 gives the old figure.
-#   FIG2_WEIGHT=gain draws every block that on its own improves held-out
-#   prediction of vocabulary (single-block test), line width = ELPD gain;
-#   FIG2_WEIGHT=perm uses -log10(permutation p) instead. FIG2_MIN_GAIN=0.1
-#   hides the weakest links.
-#
-#   Permutation null for Step 2 (after step2a + step2b have finished):
-#     STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all bash run_dsem_pipeline.slurm permutations
-#   Use the SAME STEP2_WEIGHTS / STEP2B_BLOCKS / STEP2B_MIN_INNER as the observed
-#   run. Submits bridge -> perm2a (PERM_N x 9 tasks) -> perm2b (PERM_N tasks)
-#   -> perm_summary -> tables + Figure 2 (lines solid where the familywise
-#   permutation p < .05, dashed otherwise). Settings: PERM_N (default 100), PERM_CHAINS (2)
-#   and PERM_ITER (500) per model, PERM_MAX_RUNNING (100 tasks at once),
-#   PERM_SEED_BASE. Each permutation costs roughly 9 x 2-3 h + 3-4 h of CPU;
-#   finished permutations are skipped on resubmission, so it can be run in
-#   batches (e.g. PERM_N=20 first, later PERM_N=100); to add permutations to an
-#   existing set without queuing the finished ones, set PERM_START, e.g.
-#   PERM_START=101 PERM_N=1000. Slurm limits array size (scontrol show config |
-#   grep MaxArraySize); split big batches with PERM_START/PERM_N if needed.
-#   Re-run only the summary
-#   with:  bash run_dsem_pipeline.slurm perm_summary
-#
-#   Group-level permutations only (Step 2b without Step 2a; about 1/5 of the
-#   cost). Gives the group and global p-values; block-level within-group and
-#   final p-values keep using the runs that also have Step 2a. E.g. to go
-#   from 100 to 1000 permutations:
-#     STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all PERM_START=101 PERM_N=1000 \
-#       bash run_dsem_pipeline.slurm perm_groups
-#
-#   Variants of the group-level test (each with its own observed run, task 0,
-#   and output files tagged in PERMUTATIONS/permutation_null_<tag>_*):
-#     STEP2B_GROUPING=source   group blocks by the PREDICTING behaviour (how a
-#                              behaviour organises what follows it)
-#     STEP2B_EXCLUDE=contingent.contingent   leave a block out (here the
-#                              contingent-talk self-lag)
-#   e.g. STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all STEP2B_EXCLUDE=contingent.contingent \
-#          PERM_N=1000 bash run_dsem_pipeline.slurm perm_groups
-#
-#   Both group-level permutations and the single-block test in one go (the
-#   bridge file is made first if it does not exist; everything else waits):
-#     STEP2_WEIGHTS=pseudobma STEP2B_BLOCKS=all PERM_N=1000 bash run_dsem_pipeline.slurm group_tests
-#
-#   Single-block test (each predictor block alone vs intercept-only, with the
-#   same shuffles; needs the bridge file, so run after/with permutations):
-#     bash run_dsem_pipeline.slurm single_block
-#   Submits PERM_N + 1 tasks (observed + shuffles, ~15 min each) -> summary
-#   -> tables -> Figure 2 (solid = familywise single-block p < .05).
-#   Results: PERMUTATIONS/single_block_null.csv, single_block_report.txt
-#
-# OUTPUT: everything the pipeline writes (results, logs, temp files and the
-# unzipped data) goes under $RUN_DIR, default /scratch/q55362cb/dsem_results/.
-# Nothing is written into the repo folder. Override with e.g.
-#   RUN_DIR=/scratch/q55362cb/run2 bash run_dsem_pipeline.slurm
+# OUTPUT: everything (results, logs, temporary files and the unzipped data)
+# goes under $RUN_DIR; nothing is written into the repository folder.
 #   MODELS-STEP1/dsem_step1_<n>.rds                     Step 1 posterior draws
-#   GRANGER/granger_loocv_pairwise_elpd.csv             Step 1b, all 72 pairs
-#   MODELS-STEP1/dsem_selection_<b>_single_behaviour.rds  Step 2a
-#   MODELS-STEP1/dsem_selection_from_single_behaviour_sets_stacking_coefs.csv
-#                                                       Step 2b final weights
-#   CONVERGENCE/convergence_report.txt                  Step 1 convergence summary (+ CSVs, plots)
+#   CONVERGENCE/convergence_report.txt                  convergence summary (+ CSVs, plots)
+#   GRANGER/granger_loocv_pairwise_elpd.csv             Granger tests, all 72 pairs
 #   GRANGER/granger_direction.csv                       pairs + population-level P(effect > 0)
-#   FIGURES/figure1_granger_network.{pdf,png}            Figure 1 (+ figure1_edges.csv)
-#   FIGURES/figure2_vocabulary_network.{pdf,png}         Figure 2 (+ figure2_terms.csv)
-#   TABLES/table_S1_granger_pairs.csv, table_S2_step2_blocks.csv   supplementary tables
-#   PERMUTATIONS/perm_<k>/                              permutation runs
-#   PERMUTATIONS/permutation_null_*.csv, _report.txt    permutation p-values
+#   MODELS-STEP1/dsem_selection_<b>_single_behaviour.rds  Step 2a
+#   MODELS-STEP1/dsem_selection_from_single_behaviour_sets*  Step 2b
+#   PERMUTATIONS/single_block_null.csv, _report.txt     single-predictor test
+#   PERMUTATIONS/permutation_null[_<tag>]_*.csv, _report.txt  group-level tests
+#   PERMUTATIONS/perm_<k>/                              shuffled runs
+#   FIGURES/figure1_granger_network.{pdf,png}           Figure 1 (+ figure1_edges.csv)
+#   FIGURES/figure2_vocabulary_network.{pdf,png}        Figure 2 (+ figure2_terms.csv)
+#   TABLES/table_S1_granger_pairs.csv, table_S2_step2_blocks.csv
 #   logs/                                               one log per task
 #
-# Cluster settings below match the original runs (CSF3-style "himem"
-# partition, module apps/gcc/R/4.4.2, 7-day limit). CmdStan (>= 2.33) and the
-# R packages cmdstanr, posterior, loo and dplyr must already be
-# installed for this R module.
+# CLUSTER SETTINGS: the partition, R module, wall time and memory below are
+# those of the University of Manchester CSF3 ("himem" partition, module
+# apps/gcc/R/4.4.2, 7-day limit). CmdStan (>= 2.33) and the R packages
+# cmdstanr, posterior, loo and dplyr must be installed for the R module.
 # =============================================================================
 
 # ---------------------------- configuration ---------------------------------
@@ -161,11 +84,11 @@ R_MODULE="${R_MODULE:-apps/gcc/R/4.4.2}"
 
 N_CHAINS="${N_CHAINS:-16}"           # Step 1: one chain per array task (seed = task id)
 GRANGER_SHARDS="${GRANGER_SHARDS:-9}" # Step 1b: 9 = one outcome behaviour per task;
-                                      #   1 = everything in one job (as originally run)
+                                      #   1 = everything in one job
 
 TIME_LONG="7-0"                      # wall time for model-fitting stages
-MEM_STEP1="${MEM_STEP1:-}"           # blank = partition default (as originally run)
-MEM_GRANGER="${MEM_GRANGER:-512G}"   # original Granger job used 512G
+MEM_STEP1="${MEM_STEP1:-}"           # blank = partition default
+MEM_GRANGER="${MEM_GRANGER:-512G}"   # each shard loads all Step 1 chains
 MEM_STEP2="${MEM_STEP2:-256G}"       # steps 2a/2b load all step-1 files at once
 MEM_CONV="${MEM_CONV:-128G}"         # convergence check holds all chains' draws
 
@@ -181,9 +104,9 @@ FIG2_WEIGHT="${FIG2_WEIGHT:-inclusion}" # Figure 2 links: inclusion (two-level) 
 FIG2_MIN_GAIN="${FIG2_MIN_GAIN:-0}"  # Figure 2 with gain/perm: minimum ELPD gain to draw a link
 FIG2_THRESHOLD="${FIG2_THRESHOLD:-0.01}" # Figure 2 blocks drawn: 0.01 = all with non-negligible
                                       #   weight; perm = permutation-calibrated threshold;
-                                      #   or a number (the original paper used 0.333)
+                                      #   or a number
 FIG1_SHOW="${FIG1_SHOW:-all}"        # Figure 1: all (weak edges dashed) | strong
-STEP1_SESSION="${STEP1_SESSION:-0}"  # Step 1 options (fitVAR.R); paper: 1 (default 0 = original submission)
+STEP1_SESSION="${STEP1_SESSION:-0}"  # Step 1 options, see fitVAR.R (paper: STEP1_SESSION=1)
 STEP1_ONSET="${STEP1_ONSET:-0}"
 STEP1_LAG_STEP="${STEP1_LAG_STEP:-1}"
 GRANGER_BLOCK_ROWS="${GRANGER_BLOCK_ROWS:-20}"  # rows per block for the block SE
@@ -202,7 +125,7 @@ MEM_BRIDGE="${MEM_BRIDGE:-64G}"      # bridge job: reads one Step 1 chain at a t
 MEM_PERM="${MEM_PERM:-16G}"          # permutation tasks read the small bridge file only
 STEP2_SEED="${STEP2_SEED:-}"         # blank = each Step 2 job draws a random seed
                                       #   (printed in its log and saved in its .rds);
-                                      #   set a number to reproduce an earlier run
+                                      #   set a number to repeat a run exactly
 
 BEHAVIOURS=(contingent gaze CV non_CV index_point open_point give show other_gesture)
 # Variant group-level analyses write under their own Step 2b prefix.
@@ -223,7 +146,7 @@ STAGE="${STAGE:-${1:-submit}}"
 if [[ -z "${REPO_DIR:-}" ]]; then
   REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 fi
-RUN_DIR="${RUN_DIR:-/scratch/q55362cb/dsem_results}"
+RUN_DIR="${RUN_DIR:-/scratch/$USER/dsem_results}"
 DATA_DIR="$RUN_DIR/data_full"   # data_full.zip is unzipped here, not in the repo
 STEP1_DIR="$RUN_DIR/MODELS-STEP1"
 GRANGER_DIR="$RUN_DIR/GRANGER"
@@ -425,7 +348,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     fi
   fi
 
-  # ---- permutation null for Step 2 (not part of the default submission) ----
+  # ---- permutations repeating Step 2a and 2b (not used in the paper) ----
   if [[ "$WHAT" == permutations || "$WHAT" == bridge || "$WHAT" == perm2a || "$WHAT" == perm2b \
         || "$WHAT" == perm_summary ]]; then
     mkdir -p "$PERM_DIR"
@@ -513,11 +436,12 @@ write.csv(res, out, row.names = FALSE)
 saveRDS(res, sub("\\.csv$", ".rds", out))
 cat("Combined", length(files), "shard files ->", nrow(res), "directed pairs (paper: 72)\n")
 pos  <- res$supports_x_granger_causing_y & res$mean_coef_x_to_y > 0
-cat("ELPD improved AND positive mean coefficient:", sum(pos), "(paper: 19)\n")
-cat("  ...of which z > 2:", sum(pos & res$strong_support_diff_gt_2se), "(paper: 10)\n")
+cat("ELPD improved AND positive mean coefficient:", sum(pos), "(paper: 26)\n")
+cat("  ...of which z > 2:", sum(pos & res$strong_support_diff_gt_2se), "(observation-level SE)\n")
 for (z in intersect(c("z_child", "z_block"), names(res)))
-  cat("  ...of which", z, "> 2:", sum(pos & res[[z]] > 2, na.rm = TRUE), "\n")
-cat("Strongest edge:", res$predictor_x[1], "->", res$outcome_y[1], "(paper: gaze -> contingent)\n")
+  cat("  ...of which", z, "> 2:", sum(pos & res[[z]] > 2, na.rm = TRUE),
+      if (z == "z_child") "(paper: 7)\n" else "\n")
+cat("Largest ELPD difference:", res$predictor_x[1], "->", res$outcome_y[1], "(paper: gaze -> show)\n")
 cat("Saved", out, "\n")
 EOF
   ;;

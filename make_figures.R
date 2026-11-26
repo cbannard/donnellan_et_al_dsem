@@ -21,7 +21,7 @@
 #                         runs, of the LARGEST final inclusion probability of
 #                         any block (needs permutation_null.R output). A block
 #                         above it has a familywise permutation p < .05.
-#                    <number> — any other cut-off (the original paper used 1/3)
+#                    <number> — any other cut-off
 #   perm=          Figure 2 line style from the permutation null. Default 0:
 #                  no significance marking, all lines solid. perm=1 (or auto:
 #                  when permutation results exist): solid = significant,
@@ -52,8 +52,8 @@
 #   prob=          probability cut-off for rule=pop (default 0.95)
 #   z=             which z-score sets "strong support" (z > 2), arrow width
 #                  and colour: z_score (default; observation-level SE),
-#                  z_child (child-clustered SE) or z_block (block SE); the
-#                  last two need the current granger_analysis.R output
+#                  z_child (child-clustered SE; used in the paper) or
+#                  z_block (block SE)
 #   show=          all (default): every edge passing the rule, strong edges
 #                  (z > 2) solid and the others dashed; strong: strong edges only
 #
@@ -70,8 +70,8 @@
 #   inclusion weight is >= threshold (self-lags as loops); red = higher
 #   vocabulary, blue = lower. Arrow width shows the inclusion weight. A
 #   coloured ring round a node means that behaviour's mean (intercept) is
-#   included, coloured by direction. (The paper's log-residual-variance
-#   text has no counterpart: those terms are no longer in the model.)
+#   included, coloured by direction. This is weight=inclusion; the paper's
+#   Figure 2 uses weight=gain (see weight= above).
 #
 # Outputs (in output_folder): figure1_granger_network.{pdf,png},
 #   figure2_vocabulary_network.{pdf,png}, and CSVs of exactly what was drawn.
@@ -256,7 +256,7 @@ if (!do_fig1) {
 } else if (file.exists(granger_csv)) {
   g <- read.csv(granger_csv, stringsAsFactors = FALSE)
   if (!fig1_z %in% names(g)) stop("Column ", fig1_z, " not in ", granger_csv,
-                                  " (re-run granger_analysis.R with the current code)")
+                                  " (re-run granger_analysis.R)")
   g$z_use <- g[[fig1_z]]
   positive <- if (fig1_rule == "pop") g$pop_prob_positive >= fig1_prob else g$mean_coef_x_to_y > 0
   rule_txt <- if (fig1_rule == "pop") sprintf("population effect P(> 0) >= %.2f", fig1_prob) else "mean coefficient > 0"

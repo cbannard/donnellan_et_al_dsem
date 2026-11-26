@@ -43,7 +43,7 @@
 
 args <- commandArgs(trailingOnly = TRUE)
 
-# Random-number seed. Pass seed=<integer> to reproduce an earlier run;
+# Random-number seed. Pass seed=<integer> to repeat a run exactly;
 # otherwise a seed is drawn at random. Either way it is printed and saved in
 # the output, and fit number i uses seed + i so every Stan fit is
 # reproducible from that one number.
@@ -107,9 +107,6 @@ if (!is.na(bridge_file)) {
 } else {
   if (!is_dir(input_folder)) stop("Provided path is not a directory: ", input_folder)
   rds_files <- list.files(input_folder, pattern = "^dsem_step1_.*\\.rds$", full.names = TRUE)
-  if (length(rds_files) == 0) {
-    rds_files <- list.files(input_folder, pattern = "^dsem_result_.*\\.rds$", full.names = TRUE)
-  }
   if (length(rds_files) == 0) stop("No step-1 RDS files (dsem_step1_*.rds) found in folder: ", input_folder)
   message("Loading and combining RDS files from folder: ", input_folder)
   step1_results <- lapply(rds_files, readRDS)

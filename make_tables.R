@@ -94,7 +94,7 @@ if (file.exists(s2b_file)) {
     data.frame(group = b, be[, c("block_label", eff_cols)], stringsAsFactors = FALSE)
   }))
   if (is.null(eff)) {
-    message("Table S2: Step 2a files have no block effects (re-run step2a with the current code); ",
+    message("Table S2: Step 2a files have no block effects (re-run step2a); ",
             "effect columns left out")
   } else {
     names(eff) <- sub(paste0("^", pre), "", names(eff))

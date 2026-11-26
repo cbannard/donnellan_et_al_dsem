@@ -25,9 +25,8 @@
 # self-contained even if the CmdStan CSV files are later cleaned up.
 # The later stages read only $draws and $prep — they do not need $fit.
 #
-# OPTIONS (environment variables). The revised paper uses STEP1_SESSION=1;
-# with all defaults the script reproduces the original submission's model
-# (two sessions concatenated).
+# OPTIONS (environment variables; the paper uses STEP1_SESSION=1 and the
+# defaults for the rest)
 #   STEP1_SESSION=1    Treat the 11- and 12-month recordings as separate
 #                      series: lags are built within each session (the first
 #                      samples of a session never take lags from the end of
@@ -91,10 +90,10 @@ step1_stan <- "
 //
 // Likelihood is computed with one matrix product per child (all of that
 // child's observed time points at once) rather than one small
-// matrix-vector product per time point. The model is unchanged; this only
-// cuts the automatic-differentiation overhead, which dominated run time.
+// matrix-vector product per time point. The two are equivalent; the matrix
+// form needs far less automatic differentiation and runs much faster.
 //
-// Optional data flags (revised paper: use_session = 1, use_onset = 0):
+// Optional data flags (paper: use_session = 1, use_onset = 0):
 //   use_session = 1: each behaviour's intercept differs between the two
 //     recording sessions by delta_person[i][v] (population mean delta_pop,
 //     child-level SD sigma_delta), multiplying a centred session indicator.

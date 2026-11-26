@@ -4,7 +4,7 @@
 #
 # Usage (on a login node):
 #   bash monitor_progress.sh [RUN_DIR]          default: $RUN_DIR
-#   watch -n 300 bash monitor_progress.sh /scratch/q55362cb/dsem_results_v3
+#   watch -n 300 bash monitor_progress.sh /scratch/$USER/dsem_session
 #
 # Reads only the run folder and the queue; changes nothing. For each stage it
 # shows what has finished and, for tasks still running, how far they are:
@@ -68,8 +68,8 @@ echo
 
 # ---- Step 2a / perm2a: progress line from the task's log ----------------------
 # (Counting CmdStan output files does not work: cmdstanr deletes them when a
-# fit is garbage-collected.) Tasks started with older code print no progress
-# lines; for them only the elapsed time is shown.
+# fit is garbage-collected.) Tasks that have not yet printed a progress line
+# show only the elapsed time.
 show_2a_task() {   # $1 label, $2 log file, $3 elapsed
   local p=""
   [[ -f "$2" ]] && p=$(grep -a "^Progress" "$2" | tail -1)

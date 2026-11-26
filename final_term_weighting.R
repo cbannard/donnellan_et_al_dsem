@@ -38,15 +38,13 @@
 #       behaviour with no block reaching min_inner is left out. This keeps
 #       the outer models small enough not to overfit with 58 children.
 #   blocks=best — only the blocks of that behaviour's single best
-#       Step 2a model (highest ELPD), as in the original
-#       submission. A behaviour whose best model
+#       Step 2a model (highest ELPD). A behaviour whose best model
 #       does not beat the intercept-only model is left out. Each selected
 #       block's inner weight is set to 1, so a term's final weight is the
 #       outer inclusion weight of its behaviour.
 #   blocks=all — every block with a non-zero Step 2a inclusion weight
-#       (in practice all 10 blocks, ~46 predictors per behaviour), with the
-#       Step 2a inclusion weights as inner weights. With 58 children this
-#       overfits badly once 2-3 behaviours are combined.
+#       (in practice all 10 blocks per behaviour), with the Step 2a inclusion
+#       weights as inner weights. This is the setting used in the paper.
 #
 # This gives fine-grained inclusion probabilities at the level of individual
 # x→y predictor pairs and means, without requiring an exhaustive search
@@ -86,7 +84,7 @@
 
 args <- commandArgs(trailingOnly = TRUE)
 
-# Random-number seed. Pass seed=<integer> to reproduce an earlier run;
+# Random-number seed. Pass seed=<integer> to repeat a run exactly;
 # otherwise a seed is drawn at random. Either way it is printed and saved in
 # the output, and fit number i uses seed + i so every Stan fit is
 # reproducible from that one number.
@@ -235,9 +233,8 @@ extract_single_behaviour_record <- function(obj) {
       ))
     }
 
-    # Old format: selected_blocks integer vector (produced by an earlier version
-    # of select_terms_for_individual_behaviours.R).
-    # Convert to the block_inclusion data frame expected by this script.
+    # Selection files that list the selected blocks as an integer vector
+    # (selected_blocks) are converted to the block_inclusion data frame.
     # All selected blocks receive inclusion_weight = 1; effect_direction is
     # derived from coef_summary$mostly_positive where available.
     if (!is.null(gs$selected_blocks) &&
@@ -336,10 +333,7 @@ if (!is.na(bridge_file)) {
 } else {
   step1_files <- list.files(step1_folder, pattern = "^dsem_step1_.*\\.rds$", full.names = TRUE)
   if (length(step1_files) == 0) {
-    step1_files <- list.files(step1_folder, pattern = "^dsem_result_.*\\.rds$", full.names = TRUE)
-  }
-  if (length(step1_files) == 0) {
-    stop("No step-1 files found (expected dsem_step1_*.rds or dsem_result_*.rds) in: ", step1_folder)
+    stop("No step-1 files found (expected dsem_step1_*.rds) in: ", step1_folder)
   }
   message("Loading and combining ", length(step1_files), " step-1 files")
   step1_result <- combine_step1_results(lapply(step1_files, readRDS))
@@ -511,12 +505,6 @@ for (b in names(single_records)) {
     lapply(seq_len(V), function(i) lag_blocks[[i]]),
     list(K + 1L)
   )
-
-  # Step 2a files made before log-variance terms were removed contain an
-  # extra "Log-var" block; their inner weights are not comparable.
-  if ("block_label" %in% names(bi) && any(grepl("Log-var", bi$block_label, fixed = TRUE)))
-    stop("Selection file for '", b, "' contains a Log-var block. ",
-         "Re-run select_terms_for_individual_behaviours.R with the current code.")
 
   # weights=pseudobma: replace the Step 2a (stacking) inner weights with the
   # sum of Step 2a pseudo-BMA+ weights over the block combinations that
@@ -741,8 +729,8 @@ if (file.exists(checkpoint_file)) {
   if (!is.null(chk$results))  results  <- chk$results
   if (!is.null(chk$loo_list)) loo_list <- chk$loo_list
   # The checkpoint is written at the top of an iteration, before that combo is
-  # fitted. Newer checkpoints record the next combo to fit (next_combo); older
-  # ones stored that same index as last_completed, so it is re-fitted too.
+  # fitted, and records it as next_combo (last_completed in some checkpoint
+  # files); fitting resumes there.
   resume_from <- if (!is.null(chk$next_combo)) chk$next_combo else chk$last_completed
   message(sprintf("  Resuming from combo %d / %d", resume_from, length(combos)))
 }

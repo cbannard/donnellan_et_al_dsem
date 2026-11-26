@@ -1,7 +1,8 @@
 # Study 1 (DSEM): temporal organisation of infant–caregiver interaction and later vocabulary
 
-Code and data for Study 1 of *Identifying interaction sequences that drive
-language development* (Phil. Trans. R. Soc. B, RSTB-2025-0407). Study 2 (the
+Code and data for Study 1 of *Identifying behaviour sequences that predict
+language development with time series analysis of infant–caregiver interaction*
+(Phil. Trans. R. Soc. B, RSTB-2025-0407). Study 2 (the
 CNN) has its own repository, linked from the paper.
 
 Step 1 fits a Bayesian multilevel logistic vector autoregression (VAR(5)) to the
@@ -16,9 +17,9 @@ and permutation tests against shuffled vocabulary (Table S2 and the text).
 
 ## Versions
 
-The `main` branch reproduces the revised paper, with the settings given under
-*Reproducing the paper*. The code of the original submission is on the
-`original_submission` branch.
+The `main` branch reproduces the results in the paper, with the settings given
+under *Reproducing the paper*. The `original_submission` branch holds the code
+of the version first submitted for review.
 
 ---
 
