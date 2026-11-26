@@ -58,7 +58,8 @@
 #   re-submitting step1 only reruns missing or failed chains.
 #
 # REVIEWER ROBUSTNESS ANALYSES
-#   Step 1 options (see fitVAR.R; defaults reproduce the reported run). Use a
+#   Step 1 options (see fitVAR.R; the revised paper uses STEP1_SESSION=1,
+#   the defaults reproduce the original submission). Use a
 #   NEW RUN_DIR for each variant - the script refuses to mix options in one:
 #     STEP1_SESSION=1   lags built within each session + session intercepts
 #     STEP1_ONSET=1     predict behaviour onsets only (transition model)
@@ -182,7 +183,7 @@ FIG2_THRESHOLD="${FIG2_THRESHOLD:-0.01}" # Figure 2 blocks drawn: 0.01 = all wit
                                       #   weight; perm = permutation-calibrated threshold;
                                       #   or a number (the original paper used 0.333)
 FIG1_SHOW="${FIG1_SHOW:-all}"        # Figure 1: all (weak edges dashed) | strong
-STEP1_SESSION="${STEP1_SESSION:-0}"  # Step 1 options (fitVAR.R); defaults = reported run
+STEP1_SESSION="${STEP1_SESSION:-0}"  # Step 1 options (fitVAR.R); paper: 1 (default 0 = original submission)
 STEP1_ONSET="${STEP1_ONSET:-0}"
 STEP1_LAG_STEP="${STEP1_LAG_STEP:-1}"
 GRANGER_BLOCK_ROWS="${GRANGER_BLOCK_ROWS:-20}"  # rows per block for the block SE

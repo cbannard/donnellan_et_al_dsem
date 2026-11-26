@@ -278,6 +278,9 @@ STEP1_ITER_SAMPLING=100` set; its results are not meaningful.
 
 ## Step 1 output structure
 
+Step 1 is fitted by `fitVAR.R`; each chain is saved as `dsem_step1_<chain>.rds`
+(there is no separate `dsem_step1.R` script).
+
 ```
 MODELS-STEP1/dsem_step1_<chain>.rds
 ├── $fit, $draws   cmdstanr fit and posterior draws (incl. z_person[i,q])

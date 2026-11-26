@@ -38,8 +38,8 @@
 #       behaviour with no block reaching min_inner is left out. This keeps
 #       the outer models small enough not to overfit with 58 children.
 #   blocks=best — only the blocks of that behaviour's single best
-#       Step 2a model (highest ELPD), as in the original pipeline's
-#       dsem_step2_selection_single_behaviour.R. A behaviour whose best model
+#       Step 2a model (highest ELPD), as in the original
+#       submission. A behaviour whose best model
 #       does not beat the intercept-only model is left out. Each selected
 #       block's inner weight is set to 1, so a term's final weight is the
 #       outer inclusion weight of its behaviour.

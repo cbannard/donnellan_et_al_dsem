@@ -1,16 +1,19 @@
 # =============================================================================
-# dsem_step1.R
+# fitVAR.R
 #
 # Step 1 of the two-step DSEM pipeline.
 #
 # Fits a multilevel VAR to the infant behaviour time-series data and saves
-# the full posterior draws to an RDS file for use by dsem_step2.R.
+# the full posterior draws to an RDS file for use by the later stages
+# (check_convergence.R, granger_analysis.R, granger_direction.R,
+# select_terms_for_individual_behaviours.R, final_term_weighting.R and
+# make_bridge.R). Run it from a folder that contains (or links to) data_full/.
 #
 # Usage (interactive):
-#   source("dsem_step1.R")
+#   source("fitVAR.R")
 #
-# Usage (cluster, with job ID passed as argument):
-#   Rscript dsem_step1.R <jobid>
+# Usage (one chain; the argument is both the seed and the file suffix):
+#   Rscript fitVAR.R <chain>
 #
 # Output:
 #   dsem_step1_<jobid>.rds   — list with elements:
@@ -20,9 +23,11 @@
 #
 # NOTE: $draws is extracted immediately after sampling so that the RDS is
 # self-contained even if the CmdStan CSV files are later cleaned up.
-# dsem_step2.R reads only $draws and $prep — it does not need $fit.
+# The later stages read only $draws and $prep — they do not need $fit.
 #
-# OPTIONS (environment variables; the defaults reproduce the reported run)
+# OPTIONS (environment variables). The revised paper uses STEP1_SESSION=1;
+# with all defaults the script reproduces the original submission's model
+# (two sessions concatenated).
 #   STEP1_SESSION=1    Treat the 11- and 12-month recordings as separate
 #                      series: lags are built within each session (the first
 #                      samples of a session never take lags from the end of
@@ -89,7 +94,7 @@ step1_stan <- "
 // matrix-vector product per time point. The model is unchanged; this only
 // cuts the automatic-differentiation overhead, which dominated run time.
 //
-// Optional (data flags, both 0 in the reported run):
+// Optional data flags (revised paper: use_session = 1, use_onset = 0):
 //   use_session = 1: each behaviour's intercept differs between the two
 //     recording sessions by delta_person[i][v] (population mean delta_pop,
 //     child-level SD sigma_delta), multiplying a centred session indicator.
@@ -99,7 +104,7 @@ step1_stan <- "
 //
 // generated quantities block exposes z_person[i], the Q-vector
 //   z_i = [ vec(A[i]) | mu_person[i] ]
-// which the bridge step in dsem_step2.R uses to construct the Step 2
+// which the Step 2 scripts (and make_bridge.R) use to construct the Step 2
 // measurement model.
 
 data {
@@ -234,7 +239,7 @@ model {
 
 generated quantities {
   // z_person[i] is the full Q-vector of person i's VAR parameters.
-  // The bridge step in dsem_step2.R reads these draws to form the
+  // The Step 2 scripts read these draws to form the
   // Gaussian measurement model that propagates uncertainty into Step 2.
   array[N] vector[V * K + V] z_person;
   for (i in 1:N) {
@@ -701,6 +706,6 @@ step1_result <- fit_step1(
 )
 
 # $draws is already extracted inside fit_step1(); saving here makes the RDS
-# self-contained so dsem_step2.R does not need the CmdStan CSV files.
+# self-contained so the later stages do not need the CmdStan CSV files.
 saveRDS(step1_result, file = paste0("dsem_step1_", jobid, ".rds"))
 message("Step 1 complete. Saved to dsem_step1_", jobid, ".rds")
